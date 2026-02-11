@@ -69,3 +69,4 @@ Defined in `pyproject.toml`:
 - requests
 - pandas
 - apscheduler
+- matplotlib
