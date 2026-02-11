@@ -28,12 +28,21 @@ def _as_timestamp(value: Any) -> str:
 def export_ai_audit_report(
     scan_results: Iterable[dict[str, Any]],
     output_path: str | Path,
+    *,
+    analyst_prompt: str | None = None,
+    network_prompt: str | None = None,
 ) -> Path:
     """Export scan results to a text file formatted for downstream AI audit."""
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    lines = [AI_AUDIT_HEADER]
+    lines: list[str] = []
+    if analyst_prompt:
+        lines.extend(["SYSTEM PROMPT A", analyst_prompt, ""])
+    if network_prompt:
+        lines.extend(["SYSTEM PROMPT B", network_prompt, ""])
+
+    lines.append(AI_AUDIT_HEADER)
     for entry in scan_results:
         lines.append(
             " | ".join(
@@ -171,29 +180,25 @@ def resolve_local_network_context(timeout_seconds: int = 5) -> dict[str, str]:
 
 
 def build_analyst_prompt() -> str:
-    """Prompt template for security analyst behavior."""
+    """Prompt template for the security analyst workflow."""
     return (
-        "You are NetScouter Analyst AI. Review inbound/outbound scan sessions and flag "
-        "lateral movement and vertical scan behavior.\\n"
-        "- Lateral movement indicators: one source touching many internal hosts over similar ports.\\n"
-        "- Vertical scan indicators: one source probing many ports on a single host rapidly.\\n"
-        "- Prioritize findings by risk_level and confidence.\\n"
-        "- Recommend immediate containment actions and short follow-up investigation steps."
+        "You are a Security Analyst. I will provide network logs. Your task is to look "
+        "for 'Lateral Movement' or 'Vertical Scans'. Identify if any single IP has "
+        "appeared across multiple ports and recommend if a firewall drop rule is necessary."
     )
 
 
 def build_network_engine_prompt(public_ip_lookup: dict[str, Any] | None = None) -> str:
-    """Prompt template for network engine with dynamic local context insertion."""
+    """Prompt template for network engine with dynamic ISP and city insertion."""
     context = public_ip_lookup or resolve_local_network_context()
     city = str(context.get("city") or "Unknown")
     provider = str(context.get("provider") or "Unknown")
-    public_ip = str(context.get("public_ip") or "Unknown")
 
     return (
-        "You are NetScouter Network Engine AI. Optimize scan interpretation and threat triage "
-        f"for a system likely in {city} on ISP/provider {provider} (public IP: {public_ip}).\\n"
-        "Correlate scan cadence, destination entropy, and risk signals to identify suspicious patterns.\\n"
-        "Output concise actions for firewall policy, watchlist updates, and analyst escalation criteria."
+        "You are a specialized Network Security Engine. I am providing a log of "
+        "ESTABLISHED connections. Cross-reference the IPs. If an IP is not from my ISP "
+        f"({provider}) or my City ({city}), flag it for manual review. Focus on identifying "
+        "'Scanning' behavior where one IP hits multiple ports."
     )
 
 

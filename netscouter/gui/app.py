@@ -4,17 +4,26 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-import csv
 import queue
 import threading
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 import customtkinter as ctk
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from netscouter.export import (
+    append_scan_result,
+    build_analyst_prompt,
+    build_network_engine_prompt,
+    ensure_ai_readiness,
+    export_ai_audit_report,
+    export_session_to_xlsx,
+    resolve_local_network_context,
+)
+from netscouter.firewall.controller import banish_ip, get_firewall_status
 from netscouter.intel.geo import get_ip_intel
-from netscouter.scanner.engine import ScanJob, ScanResult, scan_targets
+from netscouter.scanner.engine import ScanJob, ScanResult, scan_established_connections, scan_targets
 
 DARK_THEME = {
     "window": "#0B0E14",
@@ -52,7 +61,7 @@ class NetScouterApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("NetScouter")
-        self.geometry("1200x760")
+        self.geometry("1240x820")
 
         self.current_mode = "dark"
         ctk.set_appearance_mode("dark")
@@ -107,9 +116,17 @@ class NetScouterApp(ctk.CTk):
         )
         self.scan_button.grid(row=0, column=4, padx=8, pady=10)
 
-        ctk.CTkLabel(self.control_card, text="Every (hours)").grid(row=0, column=5, padx=8, pady=10, sticky="w")
+        ctk.CTkButton(
+            self.control_card,
+            text="Scan ESTABLISHED",
+            corner_radius=10,
+            command=self.start_established_scan,
+            width=145,
+        ).grid(row=0, column=5, padx=6, pady=10)
+
+        ctk.CTkLabel(self.control_card, text="Every (hours)").grid(row=0, column=6, padx=8, pady=10, sticky="w")
         ctk.CTkEntry(self.control_card, width=70, textvariable=self.schedule_hours_var).grid(
-            row=0, column=6, padx=8, pady=10
+            row=0, column=7, padx=8, pady=10
         )
 
         ctk.CTkButton(
@@ -118,7 +135,7 @@ class NetScouterApp(ctk.CTk):
             corner_radius=10,
             command=self.start_recurring_scan,
             width=130,
-        ).grid(row=0, column=7, padx=6, pady=10)
+        ).grid(row=0, column=8, padx=6, pady=10)
 
         ctk.CTkButton(
             self.control_card,
@@ -126,23 +143,23 @@ class NetScouterApp(ctk.CTk):
             corner_radius=10,
             command=self.stop_recurring_scan,
             width=120,
-        ).grid(row=0, column=8, padx=6, pady=10)
-
-        ctk.CTkButton(
-            self.control_card,
-            text="Export CSV",
-            corner_radius=10,
-            command=self.export_csv,
-            width=100,
         ).grid(row=0, column=9, padx=6, pady=10)
 
         ctk.CTkButton(
             self.control_card,
-            text="Export JSON",
+            text="Export AI Audit",
             corner_radius=10,
-            command=self.export_json,
-            width=100,
+            command=self.export_ai_audit,
+            width=120,
         ).grid(row=0, column=10, padx=6, pady=10)
+
+        ctk.CTkButton(
+            self.control_card,
+            text="Export XLSX",
+            corner_radius=10,
+            command=self.export_xlsx,
+            width=110,
+        ).grid(row=0, column=11, padx=6, pady=10)
 
         self.theme_switch = ctk.CTkSegmentedButton(
             self.control_card,
@@ -151,7 +168,33 @@ class NetScouterApp(ctk.CTk):
             corner_radius=10,
         )
         self.theme_switch.set("Dark")
-        self.theme_switch.grid(row=0, column=11, padx=(12, 8), pady=10)
+        self.theme_switch.grid(row=0, column=12, padx=(12, 8), pady=10)
+
+        self.firewall_card = ctk.CTkFrame(self.control_card, corner_radius=10)
+        self.firewall_card.grid(row=1, column=0, columnspan=13, sticky="ew", padx=8, pady=(0, 10))
+        self.firewall_card.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(self.firewall_card, text="Firewall Insight").grid(row=0, column=0, padx=8, pady=8, sticky="w")
+        self.firewall_status_var = ctk.StringVar(value="Not queried")
+        ctk.CTkLabel(self.firewall_card, textvariable=self.firewall_status_var).grid(
+            row=0, column=1, padx=8, pady=8, sticky="w"
+        )
+
+        ctk.CTkButton(
+            self.firewall_card,
+            text="Refresh Firewall",
+            corner_radius=10,
+            command=self.refresh_firewall_insight,
+            width=140,
+        ).grid(row=0, column=2, padx=6, pady=8)
+
+        ctk.CTkButton(
+            self.firewall_card,
+            text="Banish Selected IP",
+            corner_radius=10,
+            command=self.banish_selected_ip,
+            width=155,
+        ).grid(row=0, column=3, padx=6, pady=8)
 
     def _build_results_table(self) -> None:
         self.table_card = ctk.CTkFrame(self, corner_radius=10)
@@ -178,9 +221,9 @@ class NetScouterApp(ctk.CTk):
         widths = {
             "port": 90,
             "status": 90,
-            "remote_ip": 180,
-            "location": 190,
-            "provider": 220,
+            "remote_ip": 190,
+            "location": 210,
+            "provider": 260,
             "risk": 90,
         }
 
@@ -211,10 +254,13 @@ class NetScouterApp(ctk.CTk):
         theme = self._active_theme()
         self.configure(fg_color=theme["window"])
 
-        for card in (self.control_card, self.table_card, self.console_card):
+        for card in (self.control_card, self.firewall_card, self.table_card, self.console_card):
             card.configure(fg_color=theme["card"])
 
-        self.scan_button.configure(fg_color=theme["scan"], text_color="#0B0E14" if self.current_mode == "dark" else "#FFFFFF")
+        self.scan_button.configure(
+            fg_color=theme["scan"],
+            text_color="#0B0E14" if self.current_mode == "dark" else "#FFFFFF",
+        )
 
         style = ttk.Style(self)
         style.theme_use("default")
@@ -273,6 +319,9 @@ class NetScouterApp(ctk.CTk):
     def start_scan(self) -> None:
         threading.Thread(target=self._start_scan_worker, daemon=True, name="scan-launcher").start()
 
+    def start_established_scan(self) -> None:
+        threading.Thread(target=self._start_established_scan_worker, daemon=True, name="established-scan-launcher").start()
+
     def _start_scan_worker(self) -> None:
         target = self.target_var.get().strip()
         if not target:
@@ -295,25 +344,50 @@ class NetScouterApp(ctk.CTk):
 
         self.scan_job = scan_targets(targets=[target], ports=ports, on_result=enqueue_result)
 
+    def _start_established_scan_worker(self) -> None:
+        try:
+            ports = self._parse_ports()
+        except ValueError:
+            self.after(0, lambda: self._log("Invalid port range"))
+            return
+
+        if self.scan_job:
+            self.scan_job.cancel()
+
+        self.after(0, lambda: self._log("Scanning remote IPs from ESTABLISHED connections"))
+
+        def enqueue_result(scan_result: ScanResult) -> None:
+            self.intel_executor.submit(self._enrich_and_queue, scan_result)
+
+        self.scan_job = scan_established_connections(ports=ports, on_result=enqueue_result)
+
     def _enrich_and_queue(self, scan_result: ScanResult) -> None:
         location = "Unknown"
         provider = "Unknown"
         risk_level = "average"
+        country = ""
+        city = ""
 
         try:
             intel = get_ip_intel(scan_result.host)
-            location = ", ".join(filter(None, [intel.get("city", ""), intel.get("country", "")])) or "Unknown"
+            country = str(intel.get("country", ""))
+            city = str(intel.get("city", ""))
+            location = ", ".join(filter(None, [city, country])) or "Unknown"
             provider = str(intel.get("provider", "Unknown"))
             risk_level = str(intel.get("risk_level", "average")).lower()
         except Exception as exc:  # noqa: BLE001
             provider = f"Lookup error: {exc}"
 
         payload = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
             "port": scan_result.port,
             "status": "Open" if scan_result.is_open else "Closed",
             "remote_ip": scan_result.host,
+            "country": country,
+            "city": city,
             "location": location,
             "provider": provider,
+            "risk_level": risk_level,
             "risk": risk_level.capitalize(),
         }
         self.ui_queue.put(payload)
@@ -326,6 +400,7 @@ class NetScouterApp(ctk.CTk):
                 break
 
             self.scan_results.append(payload)
+            append_scan_result(payload)
             row_index = len(self.scan_results) - 1
             stripe_tag = "even" if row_index % 2 == 0 else "odd"
             risk_tag = f"risk_{str(payload['risk']).lower()}"
@@ -374,45 +449,89 @@ class NetScouterApp(ctk.CTk):
         else:
             self._log("No recurring scan job to stop")
 
+    def refresh_firewall_insight(self) -> None:
+        threading.Thread(target=self._refresh_firewall_worker, daemon=True, name="firewall-insight").start()
+
+    def _refresh_firewall_worker(self) -> None:
+        try:
+            result = get_firewall_status()
+        except Exception as exc:  # noqa: BLE001
+            self.after(0, lambda: self._log(f"Firewall insight failed: {exc}"))
+            return
+
+        status_text = result.get("message") or result.get("stdout") or str(result)
+        self.after(0, lambda: self.firewall_status_var.set(status_text))
+        self.after(0, lambda: self._log(f"Firewall insight: {status_text}"))
+
+    def banish_selected_ip(self) -> None:
+        selection = self.results_table.selection()
+        if not selection:
+            self._log("Select a row first to banish an IP")
+            return
+
+        values = self.results_table.item(selection[0], "values")
+        ip = str(values[2])
+        if not ip:
+            self._log("Selected row has no remote IP")
+            return
+
+        confirm = messagebox.askyesno("Banish IP", f"Block {ip} permanently in firewall?")
+        if not confirm:
+            return
+
+        threading.Thread(target=self._banish_ip_worker, args=(ip,), daemon=True, name="banish-ip").start()
+
+    def _banish_ip_worker(self, ip: str) -> None:
+        try:
+            result = banish_ip(ip)
+        except Exception as exc:  # noqa: BLE001
+            self.after(0, lambda: self._log(f"Banish command failed: {exc}"))
+            return
+
+        message = result.get("message", str(result))
+        self.after(0, lambda: self._log(f"Banish {ip}: {message}"))
+
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.console.insert("end", f"[{timestamp}] {message}\n")
         self.console.see("end")
 
-    def export_csv(self) -> None:
+    def export_ai_audit(self) -> None:
         if not self.scan_results:
             self._log("No results to export")
             return
 
-        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        ready = ensure_ai_readiness(console=self._log)
+        if not ready:
+            self._log("AI audit export skipped: local model unavailable")
+            return
+
+        path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text", "*.txt")])
         if not path:
             return
 
-        with Path(path).open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=["port", "status", "remote_ip", "location", "provider", "risk"],
-            )
-            writer.writeheader()
-            writer.writerows(self.scan_results)
+        context = resolve_local_network_context()
+        analyst_prompt = build_analyst_prompt()
+        engine_prompt = build_network_engine_prompt(context)
+        export_ai_audit_report(
+            self.scan_results,
+            path,
+            analyst_prompt=analyst_prompt,
+            network_prompt=engine_prompt,
+        )
+        self._log(f"Exported AI audit report to {path}")
 
-        self._log(f"Exported CSV to {path}")
-
-    def export_json(self) -> None:
+    def export_xlsx(self) -> None:
         if not self.scan_results:
             self._log("No results to export")
             return
 
-        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
+        path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")])
         if not path:
             return
 
-        import json
-
-        with Path(path).open("w", encoding="utf-8") as handle:
-            json.dump(self.scan_results, handle, indent=2)
-
-        self._log(f"Exported JSON to {path}")
+        export_session_to_xlsx(self.scan_results, path)
+        self._log(f"Exported XLSX to {path}")
 
     def _on_close(self) -> None:
         if self.scan_job:
