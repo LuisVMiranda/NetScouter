@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netscouter"
+version = "0.1.0"
+description = "NetScouter desktop network intelligence toolkit"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "customtkinter>=5.2.0",
+  "psutil>=5.9.0",
+  "requests>=2.31.0",
+  "pandas>=2.2.0",
+  "apscheduler>=3.10.4"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["netscouter*"]
