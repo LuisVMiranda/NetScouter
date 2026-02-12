@@ -4,6 +4,7 @@ from .geo import clear_geo_cache, get_ip_intel
 from .iot_risk import evaluate_iot_anomaly
 from .reputation import evaluate_reputation_consensus
 from .risk import assess_ip_risk, evaluate_additional_signals, is_local_or_private_ip
+from .vuln import lookup_cves, normalize_software_version, summarize_vuln_badge
 
 __all__ = [
     "assess_ip_risk",
@@ -13,4 +14,7 @@ __all__ = [
     "evaluate_reputation_consensus",
     "get_ip_intel",
     "is_local_or_private_ip",
+    "lookup_cves",
+    "normalize_software_version",
+    "summarize_vuln_badge",
 ]

@@ -34,6 +34,7 @@ def export_ai_audit_report(
     analyst_prompt: str | None = None,
     network_prompt: str | None = None,
     quarantine_logs: Iterable[dict[str, Any]] | None = None,
+    cve_findings: Iterable[dict[str, Any]] | None = None,
 ) -> Path:
     """Export scan results to a text file formatted for downstream AI audit."""
     target = Path(output_path)
@@ -60,6 +61,25 @@ def export_ai_audit_report(
                 ]
             )
         )
+
+    cve_items = list(cve_findings or [])
+    if cve_items:
+        lines.extend(["", "CVE_ID | SEVERITY | CVSS | REMOTE_IP | PORT | SOFTWARE | VERSION | REMEDIATION"])
+        for item in cve_items:
+            lines.append(
+                " | ".join(
+                    [
+                        str(item.get("cve_id", "")),
+                        str(item.get("severity", "")),
+                        str(item.get("cvss_score", "")),
+                        str(item.get("remote_ip", "")),
+                        str(item.get("port", "")),
+                        str(item.get("software", "")),
+                        str(item.get("version", "")),
+                        str(item.get("remediation", "")),
+                    ]
+                )
+            )
 
     quarantine_items = list(quarantine_logs or [])
     if quarantine_items:
@@ -403,6 +423,7 @@ def export_session_to_xlsx(
     output_path: str | Path,
     *,
     quarantine_logs: Iterable[dict[str, Any]] | None = None,
+    cve_findings: Iterable[dict[str, Any]] | None = None,
 ) -> Path:
     """Export a scan session to XLSX using pandas DataFrame.to_excel."""
     target = Path(output_path)
@@ -410,9 +431,12 @@ def export_session_to_xlsx(
 
     dataframe = pd.DataFrame(list(scan_results))
     quarantine_df = pd.DataFrame(list(quarantine_logs or []))
+    cve_df = pd.DataFrame(list(cve_findings or []))
 
     with pd.ExcelWriter(target) as writer:
         dataframe.to_excel(writer, sheet_name="scan_results", index=False)
+        if not cve_df.empty:
+            cve_df.to_excel(writer, sheet_name="cve_findings", index=False)
         if not quarantine_df.empty:
             quarantine_df.to_excel(writer, sheet_name="quarantine_logs", index=False)
     return target

@@ -50,6 +50,7 @@ from netscouter.gui.icons import get_process_identity_label
 from netscouter.intel.geo import get_ip_intel
 from netscouter.intel.reputation import evaluate_reputation_consensus
 from netscouter.intel.packet_signals import evaluate_packet_signals
+from netscouter.intel.vuln import lookup_cves, summarize_vuln_badge
 from netscouter.scanner.engine import ScanJob, ScanResult, scan_established_connections, scan_targets
 from netscouter.scanner.honeypot import LocalHoneypot
 from netscouter.scanner.packet_stream import PacketCaptureService
@@ -121,6 +122,7 @@ class NetScouterApp(ctk.CTk):
         self.quarantine_events: list[dict[str, str | bool]] = []
         self.selected_remote_ip: str | None = None
         self.selected_port: int | None = None
+        self.vulnerability_rows: list[dict[str, str | int | float | bool]] = []
 
         self.target_var = ctk.StringVar(value="127.0.0.1")
         self.port_range_var = ctk.StringVar(value="20-1024")
@@ -416,6 +418,7 @@ class NetScouterApp(ctk.CTk):
             "provider",
             "consensus",
             "risk",
+            "vuln_badge",
             "containment",
             "alerts",
         )
@@ -431,6 +434,7 @@ class NetScouterApp(ctk.CTk):
             "provider": "Provider",
             "consensus": "Consensus",
             "risk": "Risk",
+            "vuln_badge": "Vulnerabilities",
             "containment": "Containment",
             "alerts": "Alerts",
         }
@@ -444,6 +448,7 @@ class NetScouterApp(ctk.CTk):
             "provider": 170,
             "consensus": 110,
             "risk": 80,
+            "vuln_badge": 140,
             "containment": 120,
             "alerts": 200,
         }
@@ -482,6 +487,7 @@ class NetScouterApp(ctk.CTk):
         self.bottom_tabs.add("Scanner")
         self.bottom_tabs.add("AI")
         self.bottom_tabs.add("Firewall")
+        self.bottom_tabs.add("Vulnerabilities")
 
         scanner_tab = self.bottom_tabs.tab("Scanner")
         scanner_tab.grid_columnconfigure(0, weight=1)
@@ -543,6 +549,23 @@ class NetScouterApp(ctk.CTk):
 
         self.ai_feedback_box = ctk.CTkTextbox(ai_tab, corner_radius=10)
         self.ai_feedback_box.grid(row=3, column=0, sticky="nsew")
+
+
+        vuln_tab = self.bottom_tabs.tab("Vulnerabilities")
+        vuln_tab.grid_columnconfigure(0, weight=1)
+        vuln_tab.grid_rowconfigure(1, weight=1)
+
+        self.vuln_summary_var = ctk.StringVar(value="No CVE findings yet")
+        ctk.CTkLabel(vuln_tab, textvariable=self.vuln_summary_var, anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 6))
+
+        vuln_columns = ("remote_ip", "port", "software", "version", "cve", "severity", "cvss", "hint")
+        self.vuln_table = ttk.Treeview(vuln_tab, columns=vuln_columns, show="headings", selectmode="browse")
+        headings = {"remote_ip": "Remote IP", "port": "Port", "software": "Software", "version": "Version", "cve": "CVE", "severity": "Severity", "cvss": "CVSS", "hint": "Exploitability / Remediation"}
+        widths = {"remote_ip": 150, "port": 65, "software": 110, "version": 90, "cve": 130, "severity": 90, "cvss": 70, "hint": 420}
+        for col in vuln_columns:
+            self.vuln_table.heading(col, text=headings[col])
+            self.vuln_table.column(col, width=widths[col], anchor="center")
+        self.vuln_table.grid(row=1, column=0, sticky="nsew")
 
         firewall_tab = self.bottom_tabs.tab("Firewall")
         firewall_tab.grid_columnconfigure(0, weight=1)
@@ -850,6 +873,22 @@ class NetScouterApp(ctk.CTk):
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"Reputation lookup failed: {exc}")
 
+        software = str(scan_result.software or "unknown")
+        version = str(scan_result.version or "")
+        service = str(scan_result.service or "")
+        vulns: list[dict[str, str | int | float | bool]] = []
+        if scan_result.is_open and software != "unknown":
+            try:
+                fetched = lookup_cves(software, version)
+                vulns = [dict(item) for item in fetched]
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"CVE lookup failed: {exc}")
+
+        vuln_badge = summarize_vuln_badge(vulns)
+        if any(str(item.get("severity", "")).lower() in {"critical", "high"} for item in vulns):
+            risk_level = "high"
+            warnings.append("Critical/High CVEs detected for service fingerprint")
+
         payload = {
             "scan_id": scan_id,
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -863,6 +902,13 @@ class NetScouterApp(ctk.CTk):
             "consensus": consensus_score,
             "risk_level": risk_level,
             "risk": risk_level.capitalize(),
+            "vuln_badge": vuln_badge,
+            "service": service,
+            "software": software,
+            "version": version,
+            "banner": str(scan_result.banner or ""),
+            "fingerprint_confidence": str(scan_result.fingerprint_confidence or "low"),
+            "vulnerabilities": vulns,
             "containment": "None",
             "pid": pid,
             "process_name": process_name,
@@ -918,6 +964,7 @@ class NetScouterApp(ctk.CTk):
                 payload["provider"],
                 payload["consensus"],
                 payload["risk"],
+                payload.get("vuln_badge", "✅ 0"),
                 payload.get("containment", "None"),
                 payload["alerts"],
             ),
@@ -1089,6 +1136,30 @@ class NetScouterApp(ctk.CTk):
         if changed:
             self._rerender_table()
 
+    def _refresh_vulnerability_view(self) -> None:
+        for item in self.vuln_table.get_children():
+            self.vuln_table.delete(item)
+
+        for finding in self.vulnerability_rows[-500:]:
+            self.vuln_table.insert(
+                "",
+                "end",
+                values=(
+                    finding.get("remote_ip", ""),
+                    finding.get("port", ""),
+                    finding.get("software", ""),
+                    finding.get("version", ""),
+                    finding.get("cve_id", ""),
+                    str(finding.get("severity", "")).upper(),
+                    finding.get("cvss_score", 0.0),
+                    finding.get("exploitability_hint", ""),
+                ),
+            )
+
+        critical = sum(1 for item in self.vulnerability_rows if str(item.get("severity", "")).lower() == "critical")
+        high = sum(1 for item in self.vulnerability_rows if str(item.get("severity", "")).lower() == "high")
+        self.vuln_summary_var.set(f"Total CVE findings: {len(self.vulnerability_rows)} | Critical: {critical} | High: {high}")
+
     def _drain_ui_queue(self) -> None:
         processed = 0
 
@@ -1105,12 +1176,32 @@ class NetScouterApp(ctk.CTk):
             self.scan_results.append(payload)
             append_scan_result(payload)
 
+            row_vulns = payload.get("vulnerabilities", [])
+            if isinstance(row_vulns, list):
+                for vuln in row_vulns:
+                    if not isinstance(vuln, dict):
+                        continue
+                    finding = dict(vuln)
+                    finding["remote_ip"] = payload.get("remote_ip", "")
+                    finding["port"] = payload.get("port", "")
+                    finding["software"] = payload.get("software", "")
+                    finding["version"] = payload.get("version", "")
+                    self.vulnerability_rows.append(finding)
+                    sev = str(vuln.get("severity", "")).lower()
+                    if sev in {"critical", "high"}:
+                        self._log(
+                            f"[VULN-{sev.upper()}] {finding.get('cve_id', 'CVE?')} on "
+                            f"{payload.get('remote_ip')}:{payload.get('port')} | "
+                            f"{vuln.get('exploitability_hint', '')} Remediation: {vuln.get('remediation', '')}"
+                        )
+
             if processed % 4 == 0:
                 self._log(f"Port {payload['port']} on {payload['remote_ip']}: {payload['status']} | Risk {payload['risk']}")
             processed += 1
 
         if processed > 0:
             self._rerender_table()
+            self._refresh_vulnerability_view()
 
         self.after(20 if processed >= QUEUE_BATCH_LIMIT else 120, self._drain_ui_queue)
 
@@ -1595,6 +1686,7 @@ class NetScouterApp(ctk.CTk):
             analyst_prompt=analyst_prompt,
             network_prompt=engine_prompt,
             quarantine_logs=self.quarantine_events,
+            cve_findings=self.vulnerability_rows,
         )
         self._log(f"Exported AI audit report to {path}")
 
@@ -1608,7 +1700,7 @@ class NetScouterApp(ctk.CTk):
         if not path:
             return
 
-        export_session_to_xlsx(rows, path, quarantine_logs=self.quarantine_events)
+        export_session_to_xlsx(rows, path, quarantine_logs=self.quarantine_events, cve_findings=self.vulnerability_rows)
         self._log(f"Exported XLSX to {path}")
 
     def analyze_logs(self) -> None:
