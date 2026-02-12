@@ -83,12 +83,15 @@ def collect_established_connections() -> list[tuple[str, int]]:
 def _callback_consumer(
     result_queue: queue.Queue[ScanResult | None],
     on_result: Callable[[ScanResult], None],
+    on_complete: Callable[[], None] | None = None,
 ) -> None:
     """Consume queue entries and run callbacks outside scanner threads."""
     while True:
         result = result_queue.get()
         if result is None:
             result_queue.task_done()
+            if on_complete:
+                on_complete()
             break
 
         try:
@@ -102,6 +105,7 @@ def scan_targets(
     ports: Sequence[int],
     on_result: Callable[[ScanResult], None],
     *,
+    on_complete: Callable[[], None] | None = None,
     max_workers: int = 128,
     timeout: float = 0.6,
 ) -> ScanJob:
@@ -112,7 +116,7 @@ def scan_targets(
 
     callback_worker = threading.Thread(
         target=_callback_consumer,
-        args=(result_queue, on_result),
+        args=(result_queue, on_result, on_complete),
         daemon=True,
         name="scan-callback-consumer",
     )
@@ -157,9 +161,17 @@ def scan_established_connections(
     ports: Iterable[int],
     on_result: Callable[[ScanResult], None],
     *,
+    on_complete: Callable[[], None] | None = None,
     max_workers: int = 128,
     timeout: float = 0.6,
 ) -> ScanJob:
     """Convenience wrapper: scan remotes discovered from ESTABLISHED sockets."""
     targets = sorted({ip for ip, _ in collect_established_connections()})
-    return scan_targets(targets=targets, ports=list(ports), on_result=on_result, max_workers=max_workers, timeout=timeout)
+    return scan_targets(
+        targets=targets,
+        ports=list(ports),
+        on_result=on_result,
+        on_complete=on_complete,
+        max_workers=max_workers,
+        timeout=timeout,
+    )
