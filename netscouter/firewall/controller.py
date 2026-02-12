@@ -27,7 +27,15 @@ def detect_os() -> str:
 def _run_command(command: list[str]) -> dict[str, Any]:
     """Execute command and return a GUI-friendly structured result."""
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, check=True)
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+            timeout=8,
+        )
         return {
             "success": True,
             "command": " ".join(command),
@@ -57,6 +65,13 @@ def _run_command(command: list[str]) -> dict[str, Any]:
             "stdout": (exc.stdout or "").strip(),
             "stderr": (exc.stderr or "").strip(),
             "message": "Firewall command failed.",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "error": "timeout",
+            "command": " ".join(command),
+            "message": "Firewall command timed out.",
         }
     except OSError as exc:
         return {
@@ -156,10 +171,7 @@ def get_firewall_status() -> dict[str, Any]:
             }
 
         parsed = _parse_windows_profiles(status_result.get("stdout", ""))
-        rules_result = _run_command(["netsh", "advfirewall", "firewall", "show", "rule", "name=all"])
-        active_rules_count = 0
-        if rules_result["success"]:
-            active_rules_count = len(re.findall(r"^Rule Name:\s", rules_result.get("stdout", ""), flags=re.MULTILINE))
+        active_rules_count = None
 
         return {
             "success": True,
@@ -175,7 +187,7 @@ def get_firewall_status() -> dict[str, Any]:
                 (v.get("default_outbound") for v in parsed["profile_modes"].values() if v.get("default_outbound") is not None),
                 None,
             ),
-            "details": {"status": status_result, "rules": rules_result},
+            "details": {"status": status_result},
             "message": "Windows firewall status collected.",
         }
 
