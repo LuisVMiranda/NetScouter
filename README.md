@@ -101,6 +101,17 @@ Defined in `pyproject.toml`:
 - matplotlib
 - scapy
 
+### Live packet stream quick usage
+
+1. Run a scan in **Dashboard** and click a row, or set a target IP manually.
+2. Click **Start Live Packet Stream**.
+3. Read updates in the packet detail panel (double-click a row for full report).
+4. Use **Export packet slice** for JSON evidence capture.
+
+If the stream does not start, run with elevated privileges and ensure packet-capture drivers are present:
+- Windows: run shell as Administrator and install Npcap.
+- Linux/macOS: run with sudo or grant packet capabilities.
+
 ## Live packet streaming permissions
 
 NetScouter can stream packets live with Scapy. Raw packet sniffing generally requires elevated privileges:
