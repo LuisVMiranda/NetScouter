@@ -5,8 +5,11 @@ from __future__ import annotations
 import ipaddress
 import platform
 import re
+import socket
 import subprocess
 from typing import Any
+
+from .quarantine import build_quarantine_plan
 
 
 def detect_os() -> str:
@@ -616,4 +619,85 @@ def banish_ip(ip: str) -> dict[str, Any]:
         "ip": clean_ip,
         "error": "unsupported_platform",
         "message": "IP blocking is unsupported on this operating system.",
+    }
+
+
+def is_sinkhole_healthy(host: str = "127.0.0.1", port: int = 25252, timeout: float = 0.6) -> bool:
+    """Check if the local sinkhole listener is reachable."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            return sock.connect_ex((host, int(port))) == 0
+    except OSError:
+        return False
+
+
+def quarantine_ip(ip: str, *, sinkhole_host: str = "127.0.0.1", sinkhole_port: int = 25252) -> dict[str, Any]:
+    """Redirect quarantined source traffic to local sinkhole when healthy."""
+    validated = _validate_ip(ip)
+    if validated is None or not validated["success"]:
+        return validated or {
+            "success": False,
+            "error": "invalid_ip",
+            "message": "Invalid IP address.",
+        }
+
+    if not is_sinkhole_healthy(host=sinkhole_host, port=sinkhole_port):
+        return {
+            "success": False,
+            "ip": validated["ip"],
+            "error": "sinkhole_unhealthy",
+            "message": f"Quarantine aborted: sinkhole service {sinkhole_host}:{sinkhole_port} is not healthy.",
+        }
+
+    os_name = detect_os()
+    plan = build_quarantine_plan(
+        platform=os_name,
+        source_ip=validated["ip"],
+        sinkhole_host=sinkhole_host,
+        sinkhole_port=sinkhole_port,
+    )
+    if not plan.commands:
+        return {
+            "success": False,
+            "platform": os_name,
+            "ip": validated["ip"],
+            "error": "unsupported_platform",
+            "message": plan.notes,
+        }
+
+    step_results = [_run_command(command) for command in plan.commands]
+    success = all(step.get("success") for step in step_results)
+    return {
+        "success": success,
+        "platform": os_name,
+        "ip": validated["ip"],
+        "action": "quarantine",
+        "sinkhole": f"{sinkhole_host}:{sinkhole_port}",
+        "steps": step_results,
+        "notes": plan.notes,
+        "message": "Quarantine redirect rules applied." if success else "Failed to apply one or more quarantine rules.",
+    }
+
+
+def enforce_ip_policy(
+    ip: str,
+    *,
+    action: str = "block",
+    sinkhole_host: str = "127.0.0.1",
+    sinkhole_port: int = 25252,
+) -> dict[str, Any]:
+    """Firewall action abstraction for block/quarantine controls."""
+    clean_action = action.lower().strip()
+    if clean_action == "block":
+        result = banish_ip(ip)
+        result["action"] = "block"
+        return result
+    if clean_action == "quarantine":
+        return quarantine_ip(ip, sinkhole_host=sinkhole_host, sinkhole_port=sinkhole_port)
+    return {
+        "success": False,
+        "ip": ip,
+        "error": "invalid_action",
+        "message": "Action must be 'block' or 'quarantine'.",
     }

@@ -20,6 +20,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from netscouter.export import (
     analyze_logs_with_ollama,
+    append_quarantine_interaction,
     append_scan_result,
     build_analyst_prompt,
     build_network_engine_prompt,
@@ -31,7 +32,7 @@ from netscouter.export import (
 from netscouter.firewall.controller import (
     add_custom_rule,
     apply_firewall_preset,
-    banish_ip,
+    enforce_ip_policy,
     get_firewall_status,
     panic_button,
     remove_custom_rule,
@@ -42,6 +43,7 @@ from netscouter.intel.geo import get_ip_intel
 from netscouter.intel.reputation import evaluate_reputation_consensus
 from netscouter.intel.packet_signals import evaluate_packet_signals
 from netscouter.scanner.engine import ScanJob, ScanResult, scan_established_connections, scan_targets
+from netscouter.scanner.honeypot import LocalHoneypot
 from netscouter.scanner.packet_stream import PacketCaptureService
 
 DARK_THEME = {
@@ -103,7 +105,9 @@ class NetScouterApp(ctk.CTk):
         self.active_scan_id = 0
         self.log_line_count = 0
         self.packet_service = PacketCaptureService(max_packets=1200)
+        self.honeypot = LocalHoneypot()
         self.packet_alert_cache: set[str] = set()
+        self.quarantine_events: list[dict[str, str | bool]] = []
         self.selected_remote_ip: str | None = None
         self.selected_port: int | None = None
 
@@ -138,6 +142,8 @@ class NetScouterApp(ctk.CTk):
         self._build_console()
         self._apply_theme()
 
+        self._start_honeypot()
+
         self.after(120, self._drain_ui_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -146,6 +152,13 @@ class NetScouterApp(ctk.CTk):
         state = "disabled" if running else "normal"
         self.scan_button.configure(state=state)
         self.scan_established_button.configure(state=state)
+
+    def _start_honeypot(self) -> None:
+        started = self.honeypot.start()
+        if started:
+            self._log(f"Quarantine sinkhole ready on {self.honeypot.host}:{self.honeypot.port}")
+        else:
+            self._log(f"Quarantine sinkhole unavailable on {self.honeypot.host}:{self.honeypot.port}")
 
     def _configure_grid(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -231,6 +244,14 @@ class NetScouterApp(ctk.CTk):
             width=155,
         ).grid(row=0, column=5, padx=6, pady=8)
 
+        ctk.CTkButton(
+            self.ops_row,
+            text="Quarantine Selected IP",
+            corner_radius=10,
+            command=self.quarantine_selected_ip,
+            width=175,
+        ).grid(row=0, column=6, padx=6, pady=8)
+
         self.theme_switch = ctk.CTkSegmentedButton(
             self.ops_row,
             values=["🌙", "☀️"],
@@ -239,11 +260,11 @@ class NetScouterApp(ctk.CTk):
             width=170,
         )
         self.theme_switch.set("🌙")
-        self.theme_switch.grid(row=0, column=6, padx=(10, 6), pady=8)
+        self.theme_switch.grid(row=0, column=7, padx=(10, 6), pady=8)
 
-        ctk.CTkLabel(self.ops_row, text="Firewall:").grid(row=0, column=7, padx=(10, 4), pady=8)
+        ctk.CTkLabel(self.ops_row, text="Firewall:").grid(row=0, column=8, padx=(10, 4), pady=8)
         ctk.CTkLabel(self.ops_row, textvariable=self.firewall_status_var, width=340, anchor="w").grid(
-            row=0, column=8, padx=4, pady=8, sticky="w"
+            row=0, column=9, padx=4, pady=8, sticky="w"
         )
 
         self.settings_row = ctk.CTkFrame(self.control_card, corner_radius=10)
@@ -362,6 +383,7 @@ class NetScouterApp(ctk.CTk):
             "provider",
             "consensus",
             "risk",
+            "containment",
             "alerts",
         )
         self.results_table = ttk.Treeview(self.table_card, columns=columns, show="headings", selectmode="browse")
@@ -376,6 +398,7 @@ class NetScouterApp(ctk.CTk):
             "provider": "Provider",
             "consensus": "Consensus",
             "risk": "Risk",
+            "containment": "Containment",
             "alerts": "Alerts",
         }
         widths = {
@@ -388,6 +411,7 @@ class NetScouterApp(ctk.CTk):
             "provider": 170,
             "consensus": 110,
             "risk": 80,
+            "containment": 120,
             "alerts": 200,
         }
 
@@ -757,6 +781,7 @@ class NetScouterApp(ctk.CTk):
             "consensus": consensus_score,
             "risk_level": risk_level,
             "risk": risk_level.capitalize(),
+            "containment": "None",
             "pid": pid,
             "process_name": process_name,
             "process_label": process_label,
@@ -799,6 +824,7 @@ class NetScouterApp(ctk.CTk):
                     payload["provider"],
                     payload["consensus"],
                     payload["risk"],
+                    payload.get("containment", "None"),
                     payload["alerts"],
                 ),
                 tags=(stripe_tag, risk_tag),
@@ -955,6 +981,7 @@ class NetScouterApp(ctk.CTk):
                         payload["provider"],
                         payload["consensus"],
                         payload["risk"],
+                        payload.get("containment", "None"),
                         payload["alerts"],
                     ),
                     tags=(stripe_tag, risk_tag),
@@ -1148,17 +1175,76 @@ class NetScouterApp(ctk.CTk):
 
         threading.Thread(target=self._banish_ip_worker, args=(ip,), daemon=True, name="banish-ip").start()
 
+    def quarantine_selected_ip(self) -> None:
+        selection = self.results_table.selection()
+        if not selection:
+            self._log("Select a row first to quarantine an IP")
+            return
+
+        values = self.results_table.item(selection[0], "values")
+        ip = str(values[2])
+        if not ip:
+            self._log("Selected row has no remote IP")
+            return
+
+        confirm = messagebox.askyesno(
+            "Quarantine IP",
+            f"Redirect {ip} to local sinkhole ({self.honeypot.host}:{self.honeypot.port})?",
+        )
+        if not confirm:
+            return
+
+        threading.Thread(target=self._quarantine_ip_worker, args=(ip,), daemon=True, name="quarantine-ip").start()
+
     def _banish_ip_worker(self, ip: str) -> None:
         try:
-            result = banish_ip(ip)
+            result = enforce_ip_policy(ip, action="block")
         except Exception as exc:  # noqa: BLE001
             with self.auto_block_guard:
                 self.auto_blocked_ips.discard(ip)
             self.after(0, lambda: self._log(f"Banish command failed: {exc}"))
             return
 
+        if result.get("success"):
+            self.after(0, lambda: self._apply_containment_state(ip, "Blocked"))
         message = result.get("message", str(result))
         self.after(0, lambda: self._log(f"Banish {ip}: {message}"))
+
+    def _quarantine_ip_worker(self, ip: str) -> None:
+        try:
+            result = enforce_ip_policy(
+                ip,
+                action="quarantine",
+                sinkhole_host=self.honeypot.host,
+                sinkhole_port=self.honeypot.port,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.after(0, lambda: self._log(f"Quarantine command failed: {exc}"))
+            return
+
+        event = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "action": "quarantine",
+            "ip": ip,
+            "sinkhole": f"{self.honeypot.host}:{self.honeypot.port}",
+            "success": bool(result.get("success")),
+        }
+        self.quarantine_events.append(event)
+        append_quarantine_interaction({**event, "result": result})
+
+        if result.get("success"):
+            self.after(0, lambda: self._apply_containment_state(ip, "Quarantined"))
+        message = result.get("message", str(result))
+        self.after(0, lambda: self._log(f"Quarantine {ip}: {message}"))
+
+    def _apply_containment_state(self, ip: str, state: str) -> None:
+        changed = False
+        for row in self.scan_results:
+            if str(row.get("remote_ip", "")) == ip:
+                row["containment"] = state
+                changed = True
+        if changed:
+            self._rerender_table()
 
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -1278,6 +1364,7 @@ class NetScouterApp(ctk.CTk):
             path,
             analyst_prompt=analyst_prompt,
             network_prompt=engine_prompt,
+            quarantine_logs=self.quarantine_events,
         )
         self._log(f"Exported AI audit report to {path}")
 
@@ -1290,7 +1377,7 @@ class NetScouterApp(ctk.CTk):
         if not path:
             return
 
-        export_session_to_xlsx(self.scan_results, path)
+        export_session_to_xlsx(self.scan_results, path, quarantine_logs=self.quarantine_events)
         self._log(f"Exported XLSX to {path}")
 
     def analyze_logs(self) -> None:
@@ -1337,6 +1424,7 @@ class NetScouterApp(ctk.CTk):
             self.scan_job.cancel()
 
         self.packet_service.stop(timeout=0.8)
+        self.honeypot.stop(timeout=0.8)
 
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)

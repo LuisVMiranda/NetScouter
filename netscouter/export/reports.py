@@ -15,6 +15,7 @@ import requests
 
 PUBLIC_IP_LOOKUP_URL = "http://ip-api.com/json/"
 AI_AUDIT_HEADER = "TIMESTAMP | PORT | REMOTE_IP | RISK_LEVEL | COUNTRY | CITY | PROVIDER"
+QUARANTINE_HEADER = "TIMESTAMP | ACTION | SOURCE_IP | SINKHOLE | RESULT"
 
 
 def _as_timestamp(value: Any) -> str:
@@ -31,6 +32,7 @@ def export_ai_audit_report(
     *,
     analyst_prompt: str | None = None,
     network_prompt: str | None = None,
+    quarantine_logs: Iterable[dict[str, Any]] | None = None,
 ) -> Path:
     """Export scan results to a text file formatted for downstream AI audit."""
     target = Path(output_path)
@@ -57,6 +59,22 @@ def export_ai_audit_report(
                 ]
             )
         )
+
+    quarantine_items = list(quarantine_logs or [])
+    if quarantine_items:
+        lines.extend(["", QUARANTINE_HEADER])
+        for event in quarantine_items:
+            lines.append(
+                " | ".join(
+                    [
+                        _as_timestamp(event.get("timestamp")),
+                        str(event.get("action", "quarantine")),
+                        str(event.get("ip") or event.get("source_ip") or ""),
+                        str(event.get("sinkhole", "")),
+                        "success" if bool(event.get("success")) else "failed",
+                    ]
+                )
+            )
 
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return target
@@ -280,11 +298,18 @@ def analyze_logs_with_ollama(
 def export_session_to_xlsx(
     scan_results: Iterable[dict[str, Any]],
     output_path: str | Path,
+    *,
+    quarantine_logs: Iterable[dict[str, Any]] | None = None,
 ) -> Path:
     """Export a scan session to XLSX using pandas DataFrame.to_excel."""
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
 
     dataframe = pd.DataFrame(list(scan_results))
-    dataframe.to_excel(target, index=False)
+    quarantine_df = pd.DataFrame(list(quarantine_logs or []))
+
+    with pd.ExcelWriter(target) as writer:
+        dataframe.to_excel(writer, sheet_name="scan_results", index=False)
+        if not quarantine_df.empty:
+            quarantine_df.to_excel(writer, sheet_name="quarantine_logs", index=False)
     return target

@@ -15,3 +15,11 @@ def get_platform_adapter() -> str:
     if "darwin" in system:
         return "macos"
     return "unknown"
+
+
+def supported_firewall_actions(adapter: str | None = None) -> tuple[str, ...]:
+    """Return firewall actions available for the active adapter."""
+    active = adapter or get_platform_adapter()
+    if active in {"windows", "linux", "macos"}:
+        return ("block", "quarantine")
+    return ("block",)

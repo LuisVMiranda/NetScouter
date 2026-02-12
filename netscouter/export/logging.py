@@ -82,3 +82,13 @@ def append_scan_result(
             json.dump(current, handle, indent=2, ensure_ascii=False)
 
     return target
+
+
+def append_quarantine_interaction(
+    record: dict[str, Any],
+    path: str | Path = "quarantine_interactions.jsonl",
+) -> Path:
+    """Append quarantine interaction metadata as JSON lines."""
+    payload = dict(record)
+    payload.setdefault("kind", "quarantine_interaction")
+    return append_scan_result(payload, path=path, as_json_lines=True)
