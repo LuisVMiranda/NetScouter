@@ -23,6 +23,7 @@ def _normalize_result(ip: str, data: dict[str, Any], risk_level: str) -> dict[st
         "country": data.get("country") or "",
         "city": data.get("city") or "",
         "provider": data.get("org") or data.get("isp") or "",
+        "countryCode": data.get("countryCode") or "",
         "risk_level": risk_level,
     }
 

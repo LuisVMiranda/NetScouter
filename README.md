@@ -95,3 +95,13 @@ Consensus scoring is displayed per row as `flagged/3`. Auto-blocking only runs w
 1. **Auto-block by consensus** is enabled in settings.
 2. The configured threshold is met (default `3`).
 3. Firewall action executes successfully.
+
+## IoT Map and anomaly detection
+
+The dashboard includes an **IoT Map** tab that can:
+
+- Discover LAN assets with a ping + ARP sweep.
+- Build an in-memory inventory keyed by MAC/IP with `device_type`, `first_seen`, and `last_seen`.
+- Correlate established outbound flows from IoT-class devices to external destinations.
+- Flag suspicious country/provider/port behavior via IoT-specific risk rules.
+- Export inventory and anomalies to JSON.

@@ -25,6 +25,7 @@ from netscouter.export import (
     build_network_engine_prompt,
     ensure_ai_readiness,
     export_ai_audit_report,
+    export_iot_map,
     export_session_to_xlsx,
     resolve_local_network_context,
 )
@@ -34,6 +35,7 @@ from netscouter.intel.geo import get_ip_intel
 from netscouter.intel.reputation import evaluate_reputation_consensus
 from netscouter.intel.packet_signals import evaluate_packet_signals
 from netscouter.scanner.engine import ScanJob, ScanResult, scan_established_connections, scan_targets
+from netscouter.scanner.lan_mapper import DeviceRegistry, correlate_iot_outbound_anomalies, discover_lan_devices
 from netscouter.scanner.packet_stream import PacketCaptureService
 
 DARK_THEME = {
@@ -98,6 +100,8 @@ class NetScouterApp(ctk.CTk):
         self.packet_alert_cache: set[str] = set()
         self.selected_remote_ip: str | None = None
         self.selected_port: int | None = None
+        self.device_registry = DeviceRegistry()
+        self.iot_anomalies: list[dict[str, str | int]] = []
 
         self.target_var = ctk.StringVar(value="127.0.0.1")
         self.port_range_var = ctk.StringVar(value="20-1024")
@@ -459,6 +463,128 @@ class NetScouterApp(ctk.CTk):
 
         self.ai_feedback_box = ctk.CTkTextbox(ai_tab, corner_radius=10)
         self.ai_feedback_box.grid(row=2, column=0, sticky="nsew")
+
+        self.bottom_tabs.add("IoT Map")
+        iot_tab = self.bottom_tabs.tab("IoT Map")
+        iot_tab.grid_columnconfigure(0, weight=1)
+        iot_tab.grid_rowconfigure(1, weight=1)
+        iot_tab.grid_rowconfigure(3, weight=1)
+
+        iot_header = ctk.CTkFrame(iot_tab, corner_radius=10)
+        iot_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ctk.CTkLabel(iot_header, text="IoT inventory and outbound anomaly correlation").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        ctk.CTkButton(iot_header, text="Discover IoT", width=110, command=self.start_iot_discovery).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkButton(iot_header, text="Export IoT Map", width=120, command=self.export_iot_map_data).grid(row=0, column=2, padx=6, pady=6)
+
+        self.iot_inventory_table = ttk.Treeview(
+            iot_tab,
+            columns=("ip", "mac", "hostname", "vendor", "device_type", "first_seen", "last_seen"),
+            show="headings",
+            height=6,
+        )
+        for name, label, width in (
+            ("ip", "IP", 130),
+            ("mac", "MAC", 140),
+            ("hostname", "Hostname", 170),
+            ("vendor", "Vendor", 170),
+            ("device_type", "Type", 90),
+            ("first_seen", "First Seen", 180),
+            ("last_seen", "Last Seen", 180),
+        ):
+            self.iot_inventory_table.heading(name, text=label)
+            self.iot_inventory_table.column(name, width=width, anchor="center")
+        self.iot_inventory_table.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
+
+        ctk.CTkLabel(iot_tab, text="Suspicious outbound links from IoT devices").grid(row=2, column=0, sticky="w", pady=(0, 4))
+        self.iot_anomaly_table = ttk.Treeview(
+            iot_tab,
+            columns=("device_ip", "device_hostname", "remote_ip", "country", "provider", "risk", "reason"),
+            show="headings",
+            height=6,
+        )
+        for name, label, width in (
+            ("device_ip", "Device IP", 120),
+            ("device_hostname", "Hostname", 150),
+            ("remote_ip", "Remote IP", 130),
+            ("country", "Country", 110),
+            ("provider", "Provider", 170),
+            ("risk", "Risk", 90),
+            ("reason", "Reason", 320),
+        ):
+            self.iot_anomaly_table.heading(name, text=label)
+            self.iot_anomaly_table.column(name, width=width, anchor="center")
+        self.iot_anomaly_table.grid(row=3, column=0, sticky="nsew")
+
+    def start_iot_discovery(self) -> None:
+        threading.Thread(target=self._start_iot_discovery_worker, daemon=True, name="iot-discovery-worker").start()
+
+    def _start_iot_discovery_worker(self) -> None:
+        self.after(0, lambda: self._log("IoT map: running LAN discovery"))
+        try:
+            discovered = discover_lan_devices()
+        except Exception as exc:  # noqa: BLE001
+            self.after(0, lambda: self._log(f"IoT discovery failed: {exc}"))
+            return
+
+        for device in discovered:
+            self.device_registry.upsert(
+                ip=str(device.get("ip", "")),
+                mac=str(device.get("mac", "")),
+                hostname=str(device.get("hostname", "Unknown")),
+                vendor=str(device.get("vendor", "Unknown")),
+                device_type=str(device.get("device_type", "unknown")),
+            )
+
+        self.iot_anomalies = correlate_iot_outbound_anomalies(self.device_registry)
+        self.after(0, self._refresh_iot_tables)
+        self.after(0, lambda: self._log(f"IoT discovery complete: {len(self.device_registry.devices)} devices, {len(self.iot_anomalies)} anomalies"))
+
+    def _refresh_iot_tables(self) -> None:
+        for table in (self.iot_inventory_table, self.iot_anomaly_table):
+            for item in table.get_children():
+                table.delete(item)
+
+        for device in self.device_registry.devices:
+            self.iot_inventory_table.insert(
+                "",
+                "end",
+                values=(
+                    device.get("ip", ""),
+                    device.get("mac", ""),
+                    device.get("hostname", "Unknown"),
+                    device.get("vendor", "Unknown"),
+                    str(device.get("device_type", "unknown")).upper(),
+                    device.get("first_seen", ""),
+                    device.get("last_seen", ""),
+                ),
+            )
+
+        for anomaly in self.iot_anomalies:
+            self.iot_anomaly_table.insert(
+                "",
+                "end",
+                values=(
+                    anomaly.get("device_ip", ""),
+                    anomaly.get("device_hostname", "Unknown"),
+                    anomaly.get("remote_ip", ""),
+                    anomaly.get("country", "Unknown"),
+                    anomaly.get("provider", "Unknown"),
+                    str(anomaly.get("risk", "average")).capitalize(),
+                    anomaly.get("reason", ""),
+                ),
+            )
+
+    def export_iot_map_data(self) -> None:
+        if not self.device_registry.devices:
+            self._log("No IoT inventory to export")
+            return
+
+        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+
+        export_iot_map(self.device_registry.devices, self.iot_anomalies, path)
+        self._log(f"Exported IoT map to {path}")
 
     def _active_theme(self) -> dict[str, str]:
         return DARK_THEME if self.current_mode == "dark" else LIGHT_THEME

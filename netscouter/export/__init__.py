@@ -1,5 +1,6 @@
 """Export utilities: logging, AI audit text, and spreadsheet writers."""
 
+from .iot import export_iot_map
 from .logging import append_scan_result
 from .reports import (
     analyze_logs_with_ollama,
@@ -15,6 +16,7 @@ from .reports import (
 
 __all__ = [
     "append_scan_result",
+    "export_iot_map",
     "analyze_logs_with_ollama",
     "build_analyst_prompt",
     "build_network_engine_prompt",
