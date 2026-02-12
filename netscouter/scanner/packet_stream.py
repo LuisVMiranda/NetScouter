@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timezone
 import ipaddress
+import socket
 import threading
 import time
 from typing import Any
@@ -33,6 +34,8 @@ class PacketCaptureService:
         self._network_cidr: str | None = None
         self._port: int | None = None
         self._mode = "remote"
+        self._capture_filter = ""
+        self._capture_interface = "default"
         self._conn_index: dict[tuple[str, int], dict[str, Any]] = {}
         self._conn_index_refreshed_at = 0.0
 
@@ -47,6 +50,14 @@ class PacketCaptureService:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def capture_filter(self) -> str:
+        return self._capture_filter
+
+    @property
+    def capture_interface(self) -> str:
+        return self._capture_interface
 
     @property
     def stop_event(self) -> threading.Event:
@@ -89,23 +100,77 @@ class PacketCaptureService:
         with self._lock:
             self._packets.clear()
 
-        bpf = f"host {remote_ip}"
+        capture_iface = self.interface or self._resolve_capture_interface(remote_ip)
+        self._capture_interface = capture_iface or "default"
+
         if mode == "local_network":
+            bpf = ""
             if network_cidr:
                 bpf = f"net {network_cidr}"
-            else:
-                bpf = "ip"
-        elif port is not None:
-            bpf = f"{bpf} and port {port}"
+            lfilter = None
+        else:
+            bpf = ""
+            lfilter = self._build_remote_lfilter(remote_ip, port)
 
-        self._sniffer = AsyncSniffer(
-            iface=self.interface,
-            filter=bpf,
-            store=False,
-            prn=self._on_packet,
-        )
+        self._capture_filter = bpf or "python-lfilter"
+
+        sniffer_kwargs: dict[str, Any] = {
+            "iface": capture_iface,
+            "store": False,
+            "prn": self._on_packet,
+        }
+        if bpf:
+            sniffer_kwargs["filter"] = bpf
+        if lfilter is not None:
+            sniffer_kwargs["lfilter"] = lfilter
+
+        self._sniffer = AsyncSniffer(**sniffer_kwargs)
         self._running = True
         self._sniffer.start()
+
+
+    def _resolve_capture_interface(self, remote_ip: str) -> str | None:
+        if self._mode == "local_network":
+            ipv4 = self._detect_local_ipv4()
+            if ipv4:
+                for iface, addrs in psutil.net_if_addrs().items():
+                    for addr in addrs:
+                        if getattr(addr, "family", None) == socket.AF_INET and getattr(addr, "address", "") == ipv4:
+                            return iface
+            return None
+        return None
+
+    def _detect_local_ipv4(self) -> str | None:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("8.8.8.8", 80))
+                return sock.getsockname()[0]
+        except OSError:
+            return None
+
+    def _build_remote_lfilter(self, remote_ip: str, port: int | None) -> Any:
+        def _accept(pkt: Any) -> bool:
+            try:
+                if not pkt.haslayer("IP"):
+                    return False
+                ip_layer = pkt.getlayer("IP")
+                src = str(getattr(ip_layer, "src", ""))
+                dst = str(getattr(ip_layer, "dst", ""))
+                if remote_ip and remote_ip not in {src, dst}:
+                    return False
+                if port is None:
+                    return True
+                if pkt.haslayer("TCP"):
+                    layer = pkt.getlayer("TCP")
+                    return int(getattr(layer, "sport", -1)) == port or int(getattr(layer, "dport", -1)) == port
+                if pkt.haslayer("UDP"):
+                    layer = pkt.getlayer("UDP")
+                    return int(getattr(layer, "sport", -1)) == port or int(getattr(layer, "dport", -1)) == port
+                return False
+            except Exception:
+                return False
+
+        return _accept
 
     def stop(self, timeout: float = 1.5) -> bool:
         """Stop capture thread and return True when stopped within timeout."""
@@ -124,6 +189,8 @@ class PacketCaptureService:
         self._sniffer = None
         self._running = False
         self._mode = "remote"
+        self._capture_filter = ""
+        self._capture_interface = "default"
         self._stopped.set()
         return self._stopped.wait(timeout)
 

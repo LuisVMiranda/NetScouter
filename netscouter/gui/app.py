@@ -1371,7 +1371,7 @@ class NetScouterApp(ctk.CTk):
     def _on_packet_scope_changed(self, *_args: object) -> None:
         mode = self.packet_stream_mode_var.get()
         if mode == "Local Network":
-            self.packet_scope_hint_var.set("Scope: local subnet traffic in/out (requires elevated privileges)")
+            self.packet_scope_hint_var.set("Scope: local interface traffic in/out (requires elevated privileges)")
         elif mode == "Target Host":
             self.packet_scope_hint_var.set("Scope: host in Target field")
         else:
@@ -1439,7 +1439,7 @@ class NetScouterApp(ctk.CTk):
                 network_cidr = derive_lan_cidr(self.local_ipv4)
                 mode = "Local Network"
         elif mode == "Local Network":
-            network_cidr = derive_lan_cidr(self.local_ipv4)
+            network_cidr = None
             target_ip = self.local_ipv4 if self.local_ipv4 != "n/a" else "0.0.0.0"
             capture_port = None
 
@@ -1496,7 +1496,8 @@ class NetScouterApp(ctk.CTk):
         self.packet_stream_status_var.set(f"Streaming {stream_target}")
         panel_scope = "local network" if mode == "Local Network" else target_ip
         self._packet_log(
-            f"Live packet stream started for {stream_target}. Logs appear below with IN/OUT direction, endpoint, and PID when available."
+            f"Live packet stream started for {stream_target} on iface={self.packet_service.capture_interface} filter={self.packet_service.capture_filter or 'none'}. "
+            "Logs appear below with IN/OUT direction, endpoint, and PID when available."
         )
         self.after(350, self._poll_packet_stream)
         self.after(4000, self._check_packet_flow)
@@ -1513,6 +1514,9 @@ class NetScouterApp(ctk.CTk):
         )
         self._packet_log(
             "If using 127.0.0.1 or your public IP as target: prefer One-click LAN Capture for Wireshark-like live subnet capture."
+        )
+        self._packet_log(
+            f"Current capture iface={self.packet_service.capture_interface} filter={self.packet_service.capture_filter or 'none'}"
         )
 
     def stop_live_packet_stream(self) -> None:
