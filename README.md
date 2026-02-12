@@ -136,6 +136,20 @@ If the stream does not start, run with elevated privileges and ensure packet-cap
 - Decrypting encrypted traffic (TLS/HTTPS/VPN) in transit is generally not feasible without endpoint keys, controlled proxies, or enterprise MITM infrastructure.
 - Full OSI decoding is possible for visible headers (L2-L4 and parts of L7), but encrypted application payloads remain opaque by design.
 
+## How to make Live Packet Stream actually capture traffic
+
+If stream starts but packet list remains empty, this is usually a **scope/driver/permission** mismatch. Use this order:
+
+1. Click **One-click LAN Capture** in Dashboard for Wireshark-like subnet-wide capture.
+2. Run NetScouter with elevated privileges (Administrator on Windows, `sudo` on Linux/macOS).
+3. Generate traffic from your machine **and another device** on your LAN (phone, TV, another PC).
+4. Avoid using only `127.0.0.1` as a target for general monitoring; loopback captures only localhost traffic.
+5. Avoid using only public/WAN IP as target for local visibility; prefer Local Network scope.
+
+Quick note:
+- `Target Host` mode is best when investigating a specific remote endpoint.
+- `Local Network` mode is best for continuous network-wide monitoring.
+
 ## Live packet streaming permissions
 
 NetScouter can stream packets live with Scapy. Raw packet sniffing generally requires elevated privileges:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import ipaddress
 import importlib.util
 import os
 import platform
@@ -297,19 +298,20 @@ class NetScouterApp(ctk.CTk):
         self.scan_row = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         self.scan_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
         self.scan_row.grid_columnconfigure(1, weight=1)
+        self.scan_row.grid_columnconfigure(6, weight=1)
         ctk.CTkLabel(self.scan_row, text="Target").grid(row=0, column=0, padx=6, pady=8, sticky="w")
         ctk.CTkEntry(self.scan_row, textvariable=self.target_var, placeholder_text="127.0.0.1 or hostname").grid(row=0, column=1, columnspan=3, padx=6, pady=8, sticky="ew")
         ctk.CTkLabel(self.scan_row, text="Port Range").grid(row=0, column=4, padx=6, pady=8, sticky="w")
         ctk.CTkEntry(self.scan_row, width=140, textvariable=self.port_range_var, placeholder_text="20-1024").grid(row=0, column=5, padx=6, pady=8)
-
         self.scan_button = ctk.CTkButton(self.scan_row, text="Scan", corner_radius=10, command=self.start_scan, width=110)
-        self.scan_button.grid(row=1, column=0, padx=6, pady=8)
+        self.scan_button.grid(row=0, column=7, padx=6, pady=8)
         self.scan_established_button = ctk.CTkButton(self.scan_row, text="Scan Established", corner_radius=10, command=self.start_established_scan, width=150)
-        self.scan_established_button.grid(row=1, column=1, padx=6, pady=8, sticky="w")
-        ctk.CTkButton(self.scan_row, text="Stop All", corner_radius=10, width=110, command=self.stop_all_tasks).grid(row=1, column=2, padx=6, pady=8)
-        ctk.CTkButton(self.scan_row, text="Show Charts", corner_radius=10, command=self.show_charts, width=110).grid(row=1, column=3, padx=6, pady=8)
+        self.scan_established_button.grid(row=0, column=8, padx=6, pady=8)
+
+        ctk.CTkButton(self.scan_row, text="Stop All", corner_radius=10, width=110, command=self.stop_all_tasks).grid(row=1, column=0, padx=6, pady=8)
+        ctk.CTkButton(self.scan_row, text="Show Charts", corner_radius=10, command=self.show_charts, width=110).grid(row=1, column=1, padx=6, pady=8)
         self.local_info_button = ctk.CTkButton(self.scan_row, text="Show/Hide Local Info", corner_radius=10, command=self.toggle_local_network_info, width=160)
-        self.local_info_button.grid(row=1, column=4, padx=6, pady=8)
+        self.local_info_button.grid(row=2, column=0, padx=6, pady=(2, 8), sticky="w")
 
         ctk.CTkLabel(
             self.scan_row,
@@ -317,7 +319,7 @@ class NetScouterApp(ctk.CTk):
             anchor="w",
             justify="left",
             wraplength=980,
-        ).grid(row=2, column=0, columnspan=6, padx=8, pady=(0, 8), sticky="ew")
+        ).grid(row=2, column=1, columnspan=8, padx=8, pady=(0, 8), sticky="ew")
 
         self._build_results_table(pane, row=2)
 
@@ -431,27 +433,35 @@ class NetScouterApp(ctk.CTk):
 
         self.filter_row = self._register_card(ctk.CTkFrame(self.table_card, corner_radius=10))
         self.filter_row.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
-        self.filter_row.grid_columnconfigure(15, weight=1)
+        self.filter_row.grid_columnconfigure(0, weight=1)
+        self.filter_row.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(self.filter_row, text="Display Filters:").grid(row=0, column=0, padx=6, pady=8)
-        self.status_filter = ctk.CTkOptionMenu(self.filter_row, values=["All Ports", "Open Ports", "Closed Ports"], variable=self.status_filter_var, command=lambda _: self._rerender_table(), corner_radius=10, width=130)
-        self.status_filter.grid(row=0, column=1, padx=6, pady=8)
-        self.risk_filter = ctk.CTkOptionMenu(self.filter_row, values=["All Risk", "Low", "Average", "High"], variable=self.risk_filter_var, command=lambda _: self._rerender_table(), corner_radius=10, width=130)
-        self.risk_filter.grid(row=0, column=2, padx=6, pady=8)
-        ctk.CTkCheckBox(self.filter_row, text="Established-only", variable=self.established_only_var, command=self._rerender_table).grid(row=0, column=3, padx=6, pady=8)
-        ctk.CTkButton(self.filter_row, text="Clear Filters", corner_radius=10, width=120, command=self.clear_filters).grid(row=0, column=4, padx=6, pady=8)
-        ctk.CTkOptionMenu(self.filter_row, values=["Selected Row", "Target Host", "Local Network"], variable=self.packet_stream_mode_var, width=140, command=self._on_packet_scope_changed).grid(row=0, column=6, padx=6, pady=8)
-        ctk.CTkButton(self.filter_row, text="Start Live Packet Stream", corner_radius=10, width=180, command=self.start_live_packet_stream).grid(row=0, column=7, padx=6, pady=8)
-        ctk.CTkButton(self.filter_row, text="Export packet slice", corner_radius=10, width=150, command=self.export_packet_slice).grid(row=0, column=9, padx=6, pady=8)
-        ctk.CTkButton(self.filter_row, text="Clear Scan Logs", corner_radius=10, width=130, command=self.clear_scan_logs).grid(row=1, column=0, padx=6, pady=(0, 8), sticky="w")
-        ctk.CTkButton(self.filter_row, text="◀", width=38, command=self._prev_table_page).grid(row=0, column=10, padx=(6, 2), pady=8)
-        ctk.CTkButton(self.filter_row, text="▶", width=38, command=self._next_table_page).grid(row=0, column=11, padx=(2, 6), pady=8)
+        filter_left = ctk.CTkFrame(self.filter_row, fg_color="transparent")
+        filter_left.grid(row=0, column=0, sticky="w", padx=(6, 18), pady=6)
+        filter_right = ctk.CTkFrame(self.filter_row, fg_color="transparent")
+        filter_right.grid(row=0, column=1, sticky="e", padx=(18, 6), pady=6)
+
+        ctk.CTkLabel(filter_left, text="Display Filters:").grid(row=0, column=0, padx=4, pady=6)
+        self.status_filter = ctk.CTkOptionMenu(filter_left, values=["All Ports", "Open Ports", "Closed Ports"], variable=self.status_filter_var, command=lambda _: self._rerender_table(), corner_radius=10, width=130)
+        self.status_filter.grid(row=0, column=1, padx=4, pady=6)
+        self.risk_filter = ctk.CTkOptionMenu(filter_left, values=["All Risk", "Low", "Average", "High"], variable=self.risk_filter_var, command=lambda _: self._rerender_table(), corner_radius=10, width=130)
+        self.risk_filter.grid(row=0, column=2, padx=4, pady=6)
+        ctk.CTkCheckBox(filter_left, text="Established-only", variable=self.established_only_var, command=self._rerender_table).grid(row=0, column=3, padx=4, pady=6)
+        ctk.CTkButton(filter_left, text="Clear Filters", corner_radius=10, width=120, command=self.clear_filters).grid(row=0, column=4, padx=4, pady=6)
+
+        ctk.CTkOptionMenu(filter_right, values=["Selected Row", "Target Host", "Local Network"], variable=self.packet_stream_mode_var, width=140, command=self._on_packet_scope_changed).grid(row=0, column=0, padx=4, pady=6)
+        ctk.CTkButton(filter_right, text="Start Live Packet Stream", corner_radius=10, width=180, command=self.start_live_packet_stream).grid(row=0, column=1, padx=4, pady=6)
+        ctk.CTkButton(filter_right, text="One-click LAN Capture", corner_radius=10, width=170, command=self.start_network_wide_capture).grid(row=0, column=2, padx=4, pady=6)
+        ctk.CTkButton(filter_right, text="Export packet slice", corner_radius=10, width=150, command=self.export_packet_slice).grid(row=0, column=3, padx=4, pady=6)
+        ctk.CTkButton(filter_right, text="Clear Scan Logs", corner_radius=10, width=130, command=self.clear_scan_logs).grid(row=0, column=4, padx=4, pady=6)
+        ctk.CTkButton(filter_right, text="◀", width=38, command=self._prev_table_page).grid(row=0, column=5, padx=(6, 2), pady=6)
+        ctk.CTkButton(filter_right, text="▶", width=38, command=self._next_table_page).grid(row=0, column=6, padx=(2, 6), pady=6)
 
         self.packet_stream_status_var = ctk.StringVar(value="Live stream idle")
-        ctk.CTkLabel(self.filter_row, textvariable=self.packet_stream_status_var).grid(row=0, column=12, padx=8, pady=8, sticky="w")
-        ctk.CTkLabel(self.filter_row, textvariable=self.packet_scope_hint_var).grid(row=0, column=13, padx=8, pady=8, sticky="w")
+        ctk.CTkLabel(self.filter_row, textvariable=self.packet_stream_status_var).grid(row=1, column=1, padx=8, pady=(0, 6), sticky="e")
+        ctk.CTkLabel(self.filter_row, textvariable=self.packet_scope_hint_var).grid(row=1, column=0, padx=8, pady=(0, 6), sticky="w")
         self.filter_summary_var = ctk.StringVar(value="Showing 0 / 0 rows")
-        ctk.CTkLabel(self.filter_row, textvariable=self.filter_summary_var).grid(row=0, column=15, padx=8, pady=8, sticky="e")
+        ctk.CTkLabel(self.filter_row, textvariable=self.filter_summary_var).grid(row=2, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="w")
         self._on_packet_scope_changed()
 
         columns = ("port", "status", "remote_ip", "process", "exe_path", "location", "provider", "consensus", "risk", "containment", "alerts")
@@ -1203,10 +1213,20 @@ class NetScouterApp(ctk.CTk):
         self.target_var.set(ip)
         self.selected_remote_ip = ip
         self.selected_port = None
-        self.packet_stream_mode_var.set("Target Host")
+        if ip == self.local_ipv4:
+            self.packet_stream_mode_var.set("Local Network")
+        else:
+            self.packet_stream_mode_var.set("Target Host")
         self._on_packet_scope_changed()
         self._show_workspace_tab("Dashboard")
-        self._packet_log(f"Tracking packets for LAN device {ip}. Starting stream in Target Host mode.")
+        stream_mode = self.packet_stream_mode_var.get()
+        self._packet_log(f"Tracking packets for LAN device {ip}. Starting stream in {stream_mode} mode.")
+        self.start_live_packet_stream()
+
+    def start_network_wide_capture(self) -> None:
+        self.packet_stream_mode_var.set("Local Network")
+        self._on_packet_scope_changed()
+        self._packet_log("One-click LAN capture enabled. Monitoring inbound/outbound traffic for the local subnet.")
         self.start_live_packet_stream()
 
     def show_selected_lan_packet_breakdown(self) -> None:
@@ -1396,16 +1416,29 @@ class NetScouterApp(ctk.CTk):
         target_ip = selected_ip or self.target_var.get().strip()
         capture_port = self.selected_port if selected_ip else None
         network_cidr: str | None = None
+        self.local_ipv4, self.local_ipv6 = self._detect_local_ip()
+
+        try:
+            parsed_target = ipaddress.ip_address(target_ip) if target_ip else None
+        except ValueError:
+            parsed_target = None
+
+        if parsed_target and (parsed_target.is_loopback or parsed_target.is_global) and mode != "Local Network":
+            mode = "Local Network"
+            self.packet_stream_mode_var.set(mode)
+            self._on_packet_scope_changed()
+            if parsed_target.is_loopback:
+                self._packet_log("Target 127.0.0.1 captures only loopback traffic. Switched to Local Network mode for practical monitoring.")
+            else:
+                self._packet_log("Public IP selected. Switched to Local Network mode so local inbound/outbound traffic is visible.")
 
         if mode == "Target Host":
             target_ip = self.target_var.get().strip()
             capture_port = None
-            self.local_ipv4, self.local_ipv6 = self._detect_local_ip()
             if target_ip and target_ip == self.local_ipv4:
                 network_cidr = derive_lan_cidr(self.local_ipv4)
                 mode = "Local Network"
         elif mode == "Local Network":
-            self.local_ipv4, self.local_ipv6 = self._detect_local_ip()
             network_cidr = derive_lan_cidr(self.local_ipv4)
             target_ip = self.local_ipv4 if self.local_ipv4 != "n/a" else "0.0.0.0"
             capture_port = None
@@ -1476,7 +1509,10 @@ class NetScouterApp(ctk.CTk):
             return
         self._packet_log(
             "No packets seen yet. Verify: (1) elevated privileges, (2) packet capture driver/backend, "
-            "(3) choose Local Network mode if monitoring host-wide traffic."
+            "(3) choose Local Network mode for host-wide visibility, (4) generate traffic on another LAN host/device."
+        )
+        self._packet_log(
+            "If using 127.0.0.1 or your public IP as target: prefer One-click LAN Capture for Wireshark-like live subnet capture."
         )
 
     def stop_live_packet_stream(self) -> None:
@@ -1514,7 +1550,10 @@ class NetScouterApp(ctk.CTk):
         packets = self.packet_service.get_packets(remote_ip=packet_filter, limit=PACKET_SLICE_LIMIT)
         if not packets:
             self.packet_stream_console.delete("1.0", "end")
-            self.packet_stream_console.insert("1.0", "No packets captured yet for this host.")
+            if self.packet_service.mode == "local_network":
+                self.packet_stream_console.insert("1.0", "No packets captured yet for local network scope. Try generating traffic from another device or run as Administrator/root.")
+            else:
+                self.packet_stream_console.insert("1.0", "No packets captured yet for this host. Tip: use One-click LAN Capture for easier host-wide monitoring.")
             return
 
         lines = []
