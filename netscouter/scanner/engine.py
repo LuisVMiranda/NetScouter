@@ -13,6 +13,7 @@ from typing import Callable, Iterable, Sequence
 
 import psutil
 
+from .fingerprinting import fingerprint_service
 from .ip_utils import is_local_or_private
 
 
@@ -30,6 +31,11 @@ class ScanResult:
     process_name: str | None = None
     exe_path: str | None = None
     cmdline: str | None = None
+    service: str | None = None
+    software: str | None = None
+    version: str | None = None
+    banner: str | None = None
+    fingerprint_confidence: str | None = None
 
 
 @dataclass(slots=True)
@@ -57,7 +63,15 @@ def _probe_tcp_port(host: str, port: int, timeout: float) -> ScanResult:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)
             is_open = sock.connect_ex((host, port)) == 0
-        return ScanResult(host=host, port=port, is_open=is_open)
+        result = ScanResult(host=host, port=port, is_open=is_open)
+        if is_open:
+            fingerprint = fingerprint_service(host, port, timeout=min(timeout, 0.8))
+            result.service = fingerprint.service
+            result.software = fingerprint.software
+            result.version = fingerprint.version
+            result.banner = fingerprint.banner
+            result.fingerprint_confidence = fingerprint.confidence
+        return result
     except OSError as exc:
         return ScanResult(host=host, port=port, is_open=False, error=str(exc))
 
