@@ -18,6 +18,12 @@ from tkinter import filedialog, messagebox, ttk
 import customtkinter as ctk
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from netscouter.analytics.timeline import (
+    bucket_events_by_time,
+    build_heatmap_matrix,
+    filter_timeline_events,
+    normalize_timeline_rows,
+)
 from netscouter.export import (
     analyze_logs_with_ollama,
     append_quarantine_interaction,
@@ -27,6 +33,8 @@ from netscouter.export import (
     ensure_ai_readiness,
     export_ai_audit_report,
     export_session_to_xlsx,
+    export_timeline_to_csv,
+    export_timeline_to_xlsx,
     resolve_local_network_context,
 )
 from netscouter.firewall.controller import (
@@ -45,6 +53,7 @@ from netscouter.intel.packet_signals import evaluate_packet_signals
 from netscouter.scanner.engine import ScanJob, ScanResult, scan_established_connections, scan_targets
 from netscouter.scanner.honeypot import LocalHoneypot
 from netscouter.scanner.packet_stream import PacketCaptureService
+from netscouter.scheduler.jobs import get_schedule_events, log_schedule_event
 
 DARK_THEME = {
     "window": "#0B0E14",
@@ -125,6 +134,9 @@ class NetScouterApp(ctk.CTk):
 
         self.status_filter_var = ctk.StringVar(value="All Status")
         self.risk_filter_var = ctk.StringVar(value="All Risk")
+        self.timeline_status_var = ctk.StringVar(value="All Status")
+        self.timeline_risk_var = ctk.StringVar(value="All Risk")
+        self.timeline_source_ip_var = ctk.StringVar(value="")
         self.auto_block_consensus_var = ctk.BooleanVar(value=False)
         self.reputation_threshold_var = ctk.StringVar(value="3")
         self.reputation_timeout_var = ctk.StringVar(value="4")
@@ -595,13 +607,22 @@ class NetScouterApp(ctk.CTk):
             return list(range(start, end + 1))
         return [int(chunk.strip()) for chunk in raw.split(",") if chunk.strip()]
 
-    def start_scan(self) -> None:
-        threading.Thread(target=self._start_scan_worker, daemon=True, name="scan-launcher").start()
+    def start_scan(self, *, source: str = "manual") -> None:
+        threading.Thread(
+            target=self._start_scan_worker,
+            kwargs={"source": source},
+            daemon=True,
+            name="scan-launcher",
+        ).start()
+
+    def _start_scan_from_schedule(self) -> None:
+        log_schedule_event(action="triggered", job_id=self.scheduled_job_id, source="scheduler")
+        self.start_scan(source="scheduler")
 
     def start_established_scan(self) -> None:
         threading.Thread(target=self._start_established_scan_worker, daemon=True, name="established-scan-launcher").start()
 
-    def _start_scan_worker(self) -> None:
+    def _start_scan_worker(self, *, source: str = "manual") -> None:
         if self.is_scan_running:
             self.after(0, lambda: self._log("A scan is already running. Please wait for completion."))
             return
@@ -621,6 +642,13 @@ class NetScouterApp(ctk.CTk):
             self.active_scan_id += 1
             scan_id = self.active_scan_id
 
+        log_schedule_event(
+            action="scan_started",
+            job_id=self.scheduled_job_id if source == "scheduler" else "manual",
+            source=source,
+            scan_id=scan_id,
+        )
+
         self.after(0, lambda: self._set_scan_running(True))
         self.after(0, lambda: self._log(f"Starting scan for {target} on {len(ports)} ports"))
 
@@ -628,6 +656,12 @@ class NetScouterApp(ctk.CTk):
             self.intel_executor.submit(self._enrich_and_queue, scan_result, scan_id)
 
         def on_complete() -> None:
+            log_schedule_event(
+                action="scan_completed",
+                job_id=self.scheduled_job_id if source == "scheduler" else "manual",
+                source=source,
+                scan_id=scan_id,
+            )
             self.after(0, lambda: self._finish_scan(scan_id, "Target scan finished"))
 
         self.scan_job = scan_targets(targets=[target], ports=ports, on_result=enqueue_result, on_complete=on_complete)
@@ -646,6 +680,13 @@ class NetScouterApp(ctk.CTk):
         with self.scan_guard:
             self.active_scan_id += 1
             scan_id = self.active_scan_id
+
+        log_schedule_event(
+            action="scan_started",
+            job_id="established_manual",
+            source="manual_established",
+            scan_id=scan_id,
+        )
 
         self.after(0, lambda: self._set_scan_running(True))
         self.after(0, lambda: self._log("Scanning remote IPs from ESTABLISHED connections"))
@@ -1010,7 +1051,7 @@ class NetScouterApp(ctk.CTk):
             self.scheduler.start()
 
         self.scheduler.add_job(
-            self.start_scan,
+            self._start_scan_from_schedule,
             "interval",
             hours=interval_hours,
             id=self.scheduled_job_id,
@@ -1018,11 +1059,18 @@ class NetScouterApp(ctk.CTk):
             max_instances=1,
             coalesce=True,
         )
+        log_schedule_event(
+            action="scheduled",
+            job_id=self.scheduled_job_id,
+            source="scheduler",
+            metadata={"interval_hours": interval_hours},
+        )
         self._log(f"Recurring scan scheduled every {interval_hours:g} hour(s)")
 
     def stop_recurring_scan(self) -> None:
         if self.scheduler.get_job(self.scheduled_job_id):
             self.scheduler.remove_job(self.scheduled_job_id)
+            log_schedule_event(action="stopped", job_id=self.scheduled_job_id, source="scheduler")
             self._log("Recurring scan stopped")
         else:
             self._log("No recurring scan job to stop")
@@ -1302,37 +1350,142 @@ class NetScouterApp(ctk.CTk):
 
         return True, "matplotlib installed successfully."
 
+    def _build_timeline_rows(self) -> list[dict[str, str | int]]:
+        overlays = get_schedule_events(job_id=self.scheduled_job_id)
+        return normalize_timeline_rows(self.scan_results, schedule_overlays=overlays)
+
+    def _export_timeline_csv(self) -> None:
+        rows = self._build_timeline_rows()
+        filtered = filter_timeline_events(
+            rows,
+            status=self.timeline_status_var.get(),
+            risk=self.timeline_risk_var.get(),
+            source_ip=self.timeline_source_ip_var.get(),
+        )
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        export_timeline_to_csv(filtered, path)
+        self._log(f"Exported timeline CSV to {path}")
+
+    def _export_timeline_xlsx(self) -> None:
+        rows = self._build_timeline_rows()
+        filtered = filter_timeline_events(
+            rows,
+            status=self.timeline_status_var.get(),
+            risk=self.timeline_risk_var.get(),
+            source_ip=self.timeline_source_ip_var.get(),
+        )
+        path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")])
+        if not path:
+            return
+        export_timeline_to_xlsx(filtered, path)
+        self._log(f"Exported timeline XLSX to {path}")
+
     def _open_charts_window(self) -> None:
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         from matplotlib.figure import Figure
 
-        risk_counts = Counter(str(row.get("risk", "Average")) for row in self.scan_results)
-        status_counts = Counter(str(row.get("status", "Closed")) for row in self.scan_results)
-
         chart_window = ctk.CTkToplevel(self)
         chart_window.title("NetScouter Charts")
-        chart_window.geometry("760x420")
+        chart_window.geometry("1060x760")
 
-        figure = Figure(figsize=(7.4, 4), dpi=100)
-        ax1 = figure.add_subplot(121)
-        ax2 = figure.add_subplot(122)
+        controls = ctk.CTkFrame(chart_window, corner_radius=10)
+        controls.pack(fill="x", padx=8, pady=(8, 4))
 
-        labels1 = list(risk_counts.keys())
-        values1 = list(risk_counts.values())
-        ax1.pie(values1, labels=labels1, autopct="%1.1f%%")
-        ax1.set_title("Risk Distribution")
+        ctk.CTkLabel(controls, text="Timeline Status").grid(row=0, column=0, padx=6, pady=8)
+        ctk.CTkOptionMenu(
+            controls,
+            values=["All Status", "Open", "Closed"],
+            variable=self.timeline_status_var,
+            width=130,
+        ).grid(row=0, column=1, padx=6, pady=8)
 
-        labels2 = list(status_counts.keys())
-        values2 = list(status_counts.values())
-        ax2.bar(labels2, values2, color=["#0EA5E9", "#FFB100"])
-        ax2.set_title("Status Count")
-        ax2.set_ylabel("Connections")
+        ctk.CTkLabel(controls, text="Timeline Risk").grid(row=0, column=2, padx=6, pady=8)
+        ctk.CTkOptionMenu(
+            controls,
+            values=["All Risk", "Low", "Average", "High"],
+            variable=self.timeline_risk_var,
+            width=130,
+        ).grid(row=0, column=3, padx=6, pady=8)
 
-        figure.tight_layout()
+        ctk.CTkLabel(controls, text="Source IP").grid(row=0, column=4, padx=6, pady=8)
+        ctk.CTkEntry(controls, textvariable=self.timeline_source_ip_var, width=160).grid(row=0, column=5, padx=6, pady=8)
 
+        figure = Figure(figsize=(10.2, 6.8), dpi=100)
+        ax1 = figure.add_subplot(221)
+        ax2 = figure.add_subplot(222)
+        ax3 = figure.add_subplot(223)
+        ax4 = figure.add_subplot(224)
         canvas = FigureCanvasTkAgg(figure, master=chart_window)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True, padx=8, pady=8)
+
+        def render_charts() -> None:
+            rows = self._build_timeline_rows()
+            filtered = filter_timeline_events(
+                rows,
+                status=self.timeline_status_var.get(),
+                risk=self.timeline_risk_var.get(),
+                source_ip=self.timeline_source_ip_var.get(),
+            )
+
+            risk_counts = Counter(str(row.get("risk", "Average")) for row in filtered)
+            status_counts = Counter(str(row.get("status", "Closed")) for row in filtered)
+            timeline = bucket_events_by_time(filtered, bucket="hour")
+            heatmap, weekdays, _hours = build_heatmap_matrix(filtered)
+
+            ax1.clear()
+            ax2.clear()
+            ax3.clear()
+            ax4.clear()
+
+            labels1 = list(risk_counts.keys())
+            values1 = list(risk_counts.values())
+            if values1:
+                ax1.pie(values1, labels=labels1, autopct="%1.1f%%")
+            else:
+                ax1.text(0.5, 0.5, "No data", ha="center", va="center")
+            ax1.set_title("Risk Distribution")
+
+            labels2 = list(status_counts.keys())
+            values2 = list(status_counts.values())
+            ax2.bar(labels2, values2, color=["#0EA5E9", "#FFB100", "#39FF14"][: len(values2)])
+            ax2.set_title("Status Count")
+            ax2.set_ylabel("Connections")
+
+            if timeline:
+                x_vals = [item["bucket"] for item in timeline]
+                y_vals = [item["total"] for item in timeline]
+                ax3.plot(x_vals, y_vals, color="#FF6B6B", linewidth=2, label="attacks")
+                for overlay in get_schedule_events(job_id=self.scheduled_job_id):
+                    if str(overlay.get("action")) not in {"triggered", "scan_started"}:
+                        continue
+                    when = overlay.get("timestamp")
+                    if isinstance(when, str):
+                        parsed = datetime.fromisoformat(when.replace("Z", "+00:00"))
+                        ax3.axvline(parsed, color="#8B5CF6", alpha=0.35, linestyle="--")
+                ax3.legend(loc="upper left")
+            else:
+                ax3.text(0.5, 0.5, "No timeline events", ha="center", va="center")
+            ax3.set_title("Attack Timeline (hourly)")
+            ax3.tick_params(axis="x", rotation=35)
+
+            image = ax4.imshow(heatmap, aspect="auto", cmap="magma")
+            ax4.set_title("Weekday/Hour Attack Heatmap")
+            ax4.set_yticks(range(len(weekdays)))
+            ax4.set_yticklabels(weekdays)
+            ax4.set_xticks([0, 4, 8, 12, 16, 20, 23])
+            ax4.set_xticklabels(["00", "04", "08", "12", "16", "20", "23"])
+            figure.colorbar(image, ax=ax4, fraction=0.046, pad=0.04)
+
+            figure.tight_layout()
+            canvas.draw()
+
+        ctk.CTkButton(controls, text="Apply Filters", command=render_charts, width=120).grid(row=0, column=6, padx=6, pady=8)
+        ctk.CTkButton(controls, text="Export CSV", command=self._export_timeline_csv, width=110).grid(row=0, column=7, padx=6, pady=8)
+        ctk.CTkButton(controls, text="Export XLSX", command=self._export_timeline_xlsx, width=110).grid(row=0, column=8, padx=6, pady=8)
+
+        canvas.get_tk_widget().pack(fill="both", expand=True, padx=8, pady=(4, 8))
+        render_charts()
 
     def _show_charts_worker(self) -> None:
         ok, details = self._ensure_matplotlib()

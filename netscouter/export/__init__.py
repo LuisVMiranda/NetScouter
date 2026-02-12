@@ -13,6 +13,7 @@ from .reports import (
     export_session_to_xlsx,
     resolve_local_network_context,
 )
+from .timeline import export_timeline_to_csv, export_timeline_to_xlsx
 
 __all__ = [
     "append_scan_result",
@@ -26,5 +27,7 @@ __all__ = [
     "ensure_ai_readiness",
     "export_ai_audit_report",
     "export_session_to_xlsx",
+    "export_timeline_to_csv",
+    "export_timeline_to_xlsx",
     "resolve_local_network_context",
 ]
