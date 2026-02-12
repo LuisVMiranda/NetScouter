@@ -14,7 +14,7 @@ import socket
 import subprocess
 import sys
 import threading
-from tkinter import filedialog, messagebox, ttk
+from tkinter import Menu, filedialog, messagebox, ttk
 
 import customtkinter as ctk
 import psutil
@@ -54,7 +54,7 @@ from netscouter.intel.reputation import evaluate_reputation_consensus
 from netscouter.intel.packet_signals import evaluate_packet_signals
 from netscouter.scanner.engine import ScanJob, ScanResult, scan_established_connections, scan_targets
 from netscouter.scanner.honeypot import LocalHoneypot
-from netscouter.scanner.packet_stream import PacketCaptureService
+from netscouter.scanner.packet_stream import PacketCaptureService, derive_lan_cidr
 from netscouter.scanner.lan_mapper import DeviceRegistry, correlate_iot_outbound_anomalies, discover_lan_devices
 from netscouter.scheduler.jobs import get_schedule_events, log_schedule_event
 
@@ -102,7 +102,7 @@ class NetScouterApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
         self.title("NetScouter")
-        self.geometry("1200x760")
+        self.geometry("1280x820")
 
         self.current_mode = "dark"
         ctk.set_appearance_mode("dark")
@@ -124,6 +124,9 @@ class NetScouterApp(ctk.CTk):
         self.quarantine_events: list[dict[str, str | bool]] = []
         self.selected_remote_ip: str | None = None
         self.selected_port: int | None = None
+        self.local_ipv4 = "n/a"
+        self.local_ipv6 = "n/a"
+        self.packet_watchlist: set[str] = set()
 
         self.target_var = ctk.StringVar(value="127.0.0.1")
         self.port_range_var = ctk.StringVar(value="20-1024")
@@ -181,10 +184,13 @@ class NetScouterApp(ctk.CTk):
         self.automation_threshold_var = ctk.StringVar(value="2")
         self.automation_action_var = ctk.StringVar(value="quarantine")
         self.automation_triggered_ips: set[str] = set()
+        self.packet_stream_mode_var = ctk.StringVar(value="Selected Row")
+        self.packet_scope_hint_var = ctk.StringVar(value="Scope: select a row or set target host")
 
         self._configure_grid()
         self._build_layout()
         self._apply_theme()
+        self.after(80, self._maximize_window)
 
         self._start_honeypot()
 
@@ -224,7 +230,7 @@ class NetScouterApp(ctk.CTk):
 
         self.tab_buttons: dict[str, ctk.CTkButton] = {}
         self.workspace_panes: dict[str, ctk.CTkFrame] = {}
-        tabs = ["Dashboard", "Intelligence", "Firewall", "AI Auditor", "Ops/Schedule"]
+        tabs = ["Dashboard", "Intelligence", "AI Auditor", "Ops/Schedule"]
         for index, name in enumerate(tabs, start=1):
             button = ctk.CTkButton(
                 left_bar,
@@ -256,10 +262,19 @@ class NetScouterApp(ctk.CTk):
 
         self._build_dashboard_tab(self._create_workspace_pane("Dashboard"))
         self._build_intelligence_tab(self._create_workspace_pane("Intelligence"))
-        self._build_firewall_tab(self._create_workspace_pane("Firewall"))
         self._build_ai_auditor_tab(self._create_workspace_pane("AI Auditor"))
         self._build_ops_schedule_tab(self._create_workspace_pane("Ops/Schedule"))
         self._show_workspace_tab("Dashboard")
+
+    def _maximize_window(self) -> None:
+        try:
+            self.state("zoomed")
+            return
+        except Exception:  # noqa: BLE001
+            pass
+        width = max(1280, self.winfo_screenwidth())
+        height = max(820, self.winfo_screenheight())
+        self.geometry(f"{width}x{height}+0+0")
 
     def _create_workspace_pane(self, name: str) -> ctk.CTkFrame:
         pane = self._register_card(ctk.CTkFrame(self.workspace, corner_radius=10))
@@ -400,7 +415,7 @@ class NetScouterApp(ctk.CTk):
 
         self.filter_row = self._register_card(ctk.CTkFrame(self.table_card, corner_radius=10))
         self.filter_row.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
-        self.filter_row.grid_columnconfigure(13, weight=1)
+        self.filter_row.grid_columnconfigure(15, weight=1)
 
         ctk.CTkLabel(self.filter_row, text="Display Filters:").grid(row=0, column=0, padx=6, pady=8)
         self.status_filter = ctk.CTkOptionMenu(self.filter_row, values=["All Ports", "Open Ports", "Closed Ports"], variable=self.status_filter_var, command=lambda _: self._rerender_table(), corner_radius=10, width=130)
@@ -410,19 +425,22 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkCheckBox(self.filter_row, text="Established-only", variable=self.established_only_var, command=self._rerender_table).grid(row=0, column=3, padx=6, pady=8)
         ctk.CTkButton(self.filter_row, text="Clear Filters", corner_radius=10, width=120, command=self.clear_filters).grid(row=0, column=4, padx=6, pady=8)
         ctk.CTkButton(self.filter_row, text="Clear Scan Logs", corner_radius=10, width=130, command=self.clear_scan_logs).grid(row=0, column=5, padx=6, pady=8)
-        ctk.CTkButton(self.filter_row, text="Start Live Packet Stream", corner_radius=10, width=180, command=self.start_live_packet_stream).grid(row=0, column=6, padx=6, pady=8)
-        ctk.CTkButton(self.filter_row, text="STOP ALL", corner_radius=10, width=90, command=self.stop_all_tasks).grid(row=0, column=7, padx=6, pady=8)
-        ctk.CTkButton(self.filter_row, text="Export packet slice", corner_radius=10, width=150, command=self.export_packet_slice).grid(row=0, column=8, padx=6, pady=8)
-        ctk.CTkButton(self.filter_row, text="◀", width=38, command=self._prev_table_page).grid(row=0, column=9, padx=(6, 2), pady=8)
-        ctk.CTkButton(self.filter_row, text="▶", width=38, command=self._next_table_page).grid(row=0, column=10, padx=(2, 6), pady=8)
+        ctk.CTkOptionMenu(self.filter_row, values=["Selected Row", "Target Host", "Local Network"], variable=self.packet_stream_mode_var, width=140, command=self._on_packet_scope_changed).grid(row=0, column=6, padx=6, pady=8)
+        ctk.CTkButton(self.filter_row, text="Start Live Packet Stream", corner_radius=10, width=180, command=self.start_live_packet_stream).grid(row=0, column=7, padx=6, pady=8)
+        ctk.CTkButton(self.filter_row, text="STOP ALL", corner_radius=10, width=90, command=self.stop_all_tasks).grid(row=0, column=8, padx=6, pady=8)
+        ctk.CTkButton(self.filter_row, text="Export packet slice", corner_radius=10, width=150, command=self.export_packet_slice).grid(row=0, column=9, padx=6, pady=8)
+        ctk.CTkButton(self.filter_row, text="◀", width=38, command=self._prev_table_page).grid(row=0, column=10, padx=(6, 2), pady=8)
+        ctk.CTkButton(self.filter_row, text="▶", width=38, command=self._next_table_page).grid(row=0, column=11, padx=(2, 6), pady=8)
 
         self.packet_stream_status_var = ctk.StringVar(value="Live stream idle")
-        ctk.CTkLabel(self.filter_row, textvariable=self.packet_stream_status_var).grid(row=0, column=11, padx=8, pady=8, sticky="w")
+        ctk.CTkLabel(self.filter_row, textvariable=self.packet_stream_status_var).grid(row=0, column=12, padx=8, pady=8, sticky="w")
+        ctk.CTkLabel(self.filter_row, textvariable=self.packet_scope_hint_var).grid(row=0, column=13, padx=8, pady=8, sticky="w")
         self.filter_summary_var = ctk.StringVar(value="Showing 0 / 0 rows")
-        ctk.CTkLabel(self.filter_row, textvariable=self.filter_summary_var).grid(row=0, column=13, padx=8, pady=8, sticky="e")
+        ctk.CTkLabel(self.filter_row, textvariable=self.filter_summary_var).grid(row=0, column=15, padx=8, pady=8, sticky="e")
+        self._on_packet_scope_changed()
 
         columns = ("port", "status", "remote_ip", "process", "exe_path", "location", "provider", "consensus", "risk", "containment", "alerts")
-        self.results_table = ttk.Treeview(self.table_card, columns=columns, show="headings", selectmode="browse")
+        self.results_table = ttk.Treeview(self.table_card, columns=columns, show="headings", selectmode="extended")
         headings = {"port": "Port", "status": "Status", "remote_ip": "Remote IP", "process": "Process", "exe_path": "Executable Path", "location": "Location", "provider": "Provider", "consensus": "Consensus", "risk": "Risk", "containment": "Containment", "alerts": "Alerts"}
         widths = {"port": 80, "status": 90, "remote_ip": 170, "process": 180, "exe_path": 300, "location": 160, "provider": 170, "consensus": 110, "risk": 80, "containment": 120, "alerts": 200}
         for name in columns:
@@ -430,16 +448,19 @@ class NetScouterApp(ctk.CTk):
             self.results_table.column(name, width=widths[name], anchor="center")
 
         y_scroll = ttk.Scrollbar(self.table_card, orient="vertical", command=self.results_table.yview, style="NetScouter.Vertical.TScrollbar")
-        self.results_table.configure(yscrollcommand=y_scroll.set)
-        self.results_table.grid(row=1, column=0, sticky="nsew", padx=(10, 0), pady=(4, 6))
-        y_scroll.grid(row=1, column=1, sticky="ns", padx=(0, 10), pady=(4, 6))
+        x_scroll = ttk.Scrollbar(self.table_card, orient="horizontal", command=self.results_table.xview, style="NetScouter.Horizontal.TScrollbar")
+        self.results_table.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        self.results_table.grid(row=1, column=0, sticky="nsew", padx=(10, 0), pady=(4, 0))
+        y_scroll.grid(row=1, column=1, sticky="ns", padx=(0, 10), pady=(4, 0))
+        x_scroll.grid(row=2, column=0, sticky="ew", padx=(10, 10), pady=(0, 6))
         self.results_table.bind("<<TreeviewSelect>>", self._on_table_select)
         self.results_table.bind("<Double-1>", self._open_selected_row_report)
+        self.results_table.bind("<Button-3>", self._open_table_context_menu)
         self.results_table.bind("<Motion>", self._on_table_hover)
         self.results_table.bind("<Leave>", lambda _e: self._hide_table_tooltip())
 
         self.packet_detail_card = self._register_card(ctk.CTkFrame(self.table_card, corner_radius=10))
-        self.packet_detail_card.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
+        self.packet_detail_card.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
         self.packet_detail_card.grid_columnconfigure(0, weight=1)
         self.packet_detail_header_var = ctk.StringVar(value="Packet detail panel: select a row to inspect traffic")
         ctk.CTkLabel(self.packet_detail_card, textvariable=self.packet_detail_header_var, anchor="w").grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
@@ -545,7 +566,10 @@ class NetScouterApp(ctk.CTk):
         )
         style.configure("Treeview.Heading", background=theme["card"], foreground=theme["text"], relief="flat")
         style.map("Treeview", background=[("selected", theme["scan"])], foreground=[("selected", "#0B0E14")])
-        style.configure("NetScouter.Vertical.TScrollbar", gripcount=0, troughcolor=theme["window"], background=theme["scan"], bordercolor=theme["window"], arrowcolor=theme["text"], lightcolor=theme["scan"], darkcolor=theme["scan"])
+        scroll_thumb = "#334155" if self.current_mode == "dark" else "#CBD5E1"
+        trough = "#1E293B" if self.current_mode == "dark" else "#E2E8F0"
+        style.configure("NetScouter.Vertical.TScrollbar", gripcount=0, troughcolor=trough, background=scroll_thumb, bordercolor=trough, arrowcolor=theme["text"], lightcolor=scroll_thumb, darkcolor=scroll_thumb)
+        style.configure("NetScouter.Horizontal.TScrollbar", gripcount=0, troughcolor=trough, background=scroll_thumb, bordercolor=trough, arrowcolor=theme["text"], lightcolor=scroll_thumb, darkcolor=scroll_thumb)
 
         self.results_table.tag_configure("even", background=theme["card"])
         self.results_table.tag_configure("odd", background=theme["row_alt"])
@@ -1030,6 +1054,14 @@ class NetScouterApp(ctk.CTk):
                         ipv6 = addr.address.split("%", maxsplit=1)[0]
             if ipv4 != "n/a" and ipv6 != "n/a":
                 break
+        if ipv4 == "n/a":
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.connect(("8.8.8.8", 80))
+                    ipv4 = sock.getsockname()[0]
+            except OSError:
+                pass
+        self.local_ipv4, self.local_ipv6 = ipv4, ipv6
         return ipv4, ipv6
 
     def show_local_network_info(self) -> None:
@@ -1175,7 +1207,7 @@ class NetScouterApp(ctk.CTk):
         if not selection:
             return
 
-        selected_item = selection[0]
+        selected_item = selection[-1]
         payload = self._table_item_lookup.get(selected_item, {})
         values = self.results_table.item(selected_item, "values")
         if len(values) < 3 and not payload:
@@ -1195,24 +1227,80 @@ class NetScouterApp(ctk.CTk):
         self.packet_detail_header_var.set(f"Packet detail panel for {selected_ip}")
         self._render_packet_slice(selected_ip)
 
+    def _open_table_context_menu(self, event: object) -> None:
+        if not hasattr(event, "x") or not hasattr(event, "y"):
+            return
+        item = self.results_table.identify_row(event.y)
+        if item and item not in self.results_table.selection():
+            self.results_table.selection_add(item)
+
+        menu = Menu(self, tearoff=0)
+        menu.add_command(label="Keep eye on selected connections", command=self.watch_selected_connections)
+        if self.packet_service.is_running:
+            menu.add_command(label="Stop packet scanning", command=self.stop_live_packet_stream)
+        else:
+            menu.add_command(label="Start packet scanning", command=self.start_live_packet_stream)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def watch_selected_connections(self) -> None:
+        selection = self.results_table.selection()
+        if not selection:
+            self._log("Select one or more rows first.")
+            return
+        added = 0
+        for item in selection:
+            payload = self._table_item_lookup.get(item, {})
+            values = self.results_table.item(item, "values")
+            ip = str(payload.get("remote_ip") or (values[2] if len(values) > 2 else "")).strip()
+            if ip and ip not in self.packet_watchlist:
+                self.packet_watchlist.add(ip)
+                added += 1
+        self._log(f"Watchlist updated: +{added} connection(s), total={len(self.packet_watchlist)}")
+
+    def _on_packet_scope_changed(self, *_args: object) -> None:
+        mode = self.packet_stream_mode_var.get()
+        if mode == "Local Network":
+            self.packet_scope_hint_var.set("Scope: local subnet traffic in/out (requires elevated privileges)")
+        elif mode == "Target Host":
+            self.packet_scope_hint_var.set("Scope: host in Target field")
+        else:
+            self.packet_scope_hint_var.set("Scope: selected table row connection")
+
     def start_live_packet_stream(self) -> None:
+        mode = self.packet_stream_mode_var.get()
         selected_ip = self.selected_remote_ip
         target_ip = selected_ip or self.target_var.get().strip()
         capture_port = self.selected_port if selected_ip else None
+        network_cidr: str | None = None
+
+        if mode == "Target Host":
+            target_ip = self.target_var.get().strip()
+            capture_port = None
+        elif mode == "Local Network":
+            self.local_ipv4, self.local_ipv6 = self._detect_local_ip()
+            network_cidr = derive_lan_cidr(self.local_ipv4)
+            target_ip = self.local_ipv4 if self.local_ipv4 != "n/a" else "0.0.0.0"
+            capture_port = None
+
         if not target_ip:
             self._log("Select a row first (or set target) before starting packet stream")
             return
 
         self._log(
-            "Live stream guide: 1) select a row, 2) run app with Administrator/root rights, "
-            "3) ensure Npcap/Scapy packet capture support is installed."
+            "Live stream guide: 1) choose stream scope, 2) run app with Administrator/root rights, "
+            "3) ensure Npcap + WinPcap compatibility (Windows) or CAP_NET_RAW/CAP_NET_ADMIN (Linux/macOS)."
         )
         try:
-            self.packet_service.start(target_ip, port=capture_port)
+            self.packet_service.start(
+                target_ip,
+                port=capture_port,
+                network_cidr=network_cidr,
+                mode="local_network" if mode == "Local Network" else "remote",
+            )
         except Exception as exc:  # noqa: BLE001
             self.packet_stream_status_var.set("Live stream failed")
             self._log(f"Live packet stream failed to start for {target_ip}: {exc}")
-            self._log("Fix: run elevated and install Npcap (Windows) or CAP_NET_RAW/CAP_NET_ADMIN (Linux/macOS).")
+            self._log("Fix checklist: run elevated, install capture driver, disable strict endpoint security hook blocking.")
             return
 
         if not self.packet_service.is_running:
@@ -1221,10 +1309,13 @@ class NetScouterApp(ctk.CTk):
             return
 
         self.packet_alert_cache.clear()
-        stream_target = f"{target_ip}:{capture_port}" if capture_port else target_ip
+        stream_target = network_cidr if mode == "Local Network" else (f"{target_ip}:{capture_port}" if capture_port else target_ip)
         self.packet_stream_status_var.set(f"Streaming {stream_target}")
-        self.packet_detail_header_var.set(f"Packet detail panel for {target_ip}")
-        self._log(f"Live packet stream started for {stream_target}. Packet logs appear in packet detail panel.")
+        panel_scope = "local network" if mode == "Local Network" else target_ip
+        self.packet_detail_header_var.set(f"Packet detail panel for {panel_scope}")
+        self._log(
+            f"Live packet stream started for {stream_target}. Logs appear below with IN/OUT direction, endpoint, and PID when available."
+        )
         self.after(350, self._poll_packet_stream)
 
     def stop_live_packet_stream(self) -> None:
@@ -1235,30 +1326,31 @@ class NetScouterApp(ctk.CTk):
         self._log("Live packet stream stopped")
 
     def export_packet_slice(self) -> None:
-        ip = self.selected_remote_ip or self.packet_service.remote_ip
+        ip = None if self.packet_service.mode == "local_network" else (self.selected_remote_ip or self.packet_service.remote_ip)
         if not ip:
-            self._log("Select an IP before exporting packet slice")
-            return
+            self._log("Exporting full local stream slice")
 
         path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
         if not path:
             return
 
         count = self.packet_service.export_packets(path, remote_ip=ip, limit=PACKET_SLICE_LIMIT)
-        self._log(f"Exported {count} packets for {ip} to {path}")
+        scope = ip or "local-network"
+        self._log(f"Exported {count} packets for {scope} to {path}")
 
     def _poll_packet_stream(self) -> None:
         if not self.packet_service.is_running:
             return
 
-        active_ip = self.packet_service.remote_ip or self.selected_remote_ip
+        active_ip = self.packet_service.remote_ip or self.selected_remote_ip or ""
         if active_ip:
             self._render_packet_slice(active_ip)
 
         self.after(350, self._poll_packet_stream)
 
     def _render_packet_slice(self, remote_ip: str) -> None:
-        packets = self.packet_service.get_packets(remote_ip=remote_ip, limit=PACKET_SLICE_LIMIT)
+        packet_filter = None if self.packet_service.mode == "local_network" else remote_ip
+        packets = self.packet_service.get_packets(remote_ip=packet_filter, limit=PACKET_SLICE_LIMIT)
         self.packet_detail_box.delete("1.0", "end")
 
         if not packets:
@@ -1267,17 +1359,21 @@ class NetScouterApp(ctk.CTk):
 
         lines = []
         for packet in packets[-24:]:
+            src = str(packet.get("src") or "")
+            direction = "OUT" if src in {self.local_ipv4, self.local_ipv6} else "IN"
+            pid = packet.get("pid")
+            proc = packet.get("process_name") or "unknown"
             lines.append(
-                f"{packet.get('timestamp')} | {packet.get('proto')} | "
+                f"{packet.get('timestamp')} | {direction} | {packet.get('proto')} | "
                 f"{packet.get('src')}:{packet.get('raw', {}).get('src_port')} -> "
                 f"{packet.get('dst')}:{packet.get('raw', {}).get('dst_port')} | "
                 f"len={packet.get('packet_length')} flags={packet.get('tcp_flags')} "
-                f"malformed={packet.get('malformed')} error={packet.get('parse_error')}"
+                f"pid={pid} proc={proc} malformed={packet.get('malformed')} error={packet.get('parse_error')}"
             )
         self.packet_detail_box.insert("1.0", "\n".join(lines))
 
-
-        alerts = evaluate_packet_signals(remote_ip, packets)
+        alert_target = remote_ip if remote_ip else "local-network"
+        alerts = evaluate_packet_signals(alert_target, packets)
         if alerts:
             self._escalate_risk_for_ip(remote_ip)
 

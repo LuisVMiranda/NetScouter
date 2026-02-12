@@ -9,7 +9,7 @@ netscouter/
   __init__.py
   main.py
   gui/
-    app.py              # Sidebar shell + workspace panes (Dashboard/Intel/Firewall/AI/Ops)
+    app.py              # Top navigation shell + panes (Dashboard/Intel/AI/Ops)
   scanner/
   intel/
   firewall/
@@ -25,14 +25,13 @@ assets/screenshots/
 
 ### GUI redesign summary
 
-- `NetScouterApp` now uses a **left vertical sidebar** to switch between five panes:
+- `NetScouterApp` now uses a **horizontal top bar** to switch panes:
   - Dashboard
-  - Intelligence
-  - Firewall
+  - Intelligence (includes firewall operations)
   - AI Auditor
   - Ops/Schedule
-- The right side is now a single workspace frame that swaps pane content.
-- Existing monolithic UI builders were split into per-pane builders for cleaner maintenance.
+- The workspace swaps pane content while preserving shared state and logs.
+- App launch now starts maximized for large-monitor workflows.
 
 ### Alerting and remote response
 
@@ -103,12 +102,12 @@ Defined in `pyproject.toml`:
 
 ### Live packet stream quick usage
 
-1. Run a scan in **Dashboard** and click a row, or set a target IP manually.
-2. Click **Start Live Packet Stream**.
-3. Read updates in the packet detail panel (double-click a row for full report).
-4. Use **Export packet slice** for JSON evidence capture.
-5. Use **Clear Scan Logs** to wipe both table rows and console logs when starting a fresh investigation.
-6. Use **Local Info** in Dashboard to display current LAN/WAN addresses.
+1. Choose a stream scope in Dashboard: **Selected Row**, **Target Host**, or **Local Network**.
+2. For row scope, select one or multiple rows in the table; right-click for quick actions.
+3. Click **Start Live Packet Stream**.
+4. Read updates in the packet detail panel, including direction (IN/OUT), source/destination, and PID when available.
+5. Use **Export packet slice** for JSON evidence capture (host scope or full local-network scope).
+6. Use **Clear Scan Logs** to wipe both table rows and console logs when starting a fresh investigation.
 
 If the stream does not start, run with elevated privileges and ensure packet-capture drivers are present:
 - Windows: run shell as Administrator and install Npcap.
@@ -122,6 +121,13 @@ If the stream does not start, run with elevated privileges and ensure packet-cap
   - Set high-risk hit threshold.
   - Choose action (`quarantine` or `banish`).
 - **LAN Device Monitor** (Ops/Schedule): discover local devices, inspect IoT anomalies, and trigger per-device containment actions.
+
+
+### About packet "decryption" and full OSI visibility
+
+- NetScouter can inspect packet metadata and unencrypted payload context when capture privileges are available.
+- Decrypting encrypted traffic (TLS/HTTPS/VPN) in transit is generally not feasible without endpoint keys, controlled proxies, or enterprise MITM infrastructure.
+- Full OSI decoding is possible for visible headers (L2-L4 and parts of L7), but encrypted application payloads remain opaque by design.
 
 ## Live packet streaming permissions
 

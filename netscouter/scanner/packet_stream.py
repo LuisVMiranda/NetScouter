@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, timezone
+import ipaddress
 import threading
+import time
 from typing import Any
+
+import psutil
 
 try:
     from scapy.all import AsyncSniffer  # type: ignore[import-not-found]
@@ -26,11 +30,19 @@ class PacketCaptureService:
         self._stopped = threading.Event()
         self._running = False
         self._remote_ip: str | None = None
+        self._network_cidr: str | None = None
         self._port: int | None = None
+        self._mode = "remote"
+        self._conn_index: dict[tuple[str, int], dict[str, Any]] = {}
+        self._conn_index_refreshed_at = 0.0
 
     @property
     def remote_ip(self) -> str | None:
         return self._remote_ip
+
+    @property
+    def mode(self) -> str:
+        return self._mode
 
     @property
     def is_running(self) -> bool:
@@ -46,22 +58,36 @@ class PacketCaptureService:
         """Set once capture has fully stopped and resources are released."""
         return self._stopped
 
-    def start(self, remote_ip: str, port: int | None = None) -> None:
-        """Start live capture for a remote IP (and optional port)."""
+    def start(
+        self,
+        remote_ip: str,
+        port: int | None = None,
+        *,
+        network_cidr: str | None = None,
+        mode: str = "remote",
+    ) -> None:
+        """Start live capture for remote IP or local-network scope."""
         if AsyncSniffer is None:
             raise RuntimeError("Scapy is unavailable. Install scapy and rerun.")
 
         self.stop(timeout=0.5)
 
         self._remote_ip = remote_ip
+        self._network_cidr = network_cidr
         self._port = port
+        self._mode = mode
         self._stop_requested.clear()
         self._stopped.clear()
         with self._lock:
             self._packets.clear()
 
         bpf = f"host {remote_ip}"
-        if port is not None:
+        if mode == "local_network":
+            if network_cidr:
+                bpf = f"net {network_cidr}"
+            else:
+                bpf = "ip"
+        elif port is not None:
             bpf = f"{bpf} and port {port}"
 
         self._sniffer = AsyncSniffer(
@@ -89,6 +115,7 @@ class PacketCaptureService:
 
         self._sniffer = None
         self._running = False
+        self._mode = "remote"
         self._stopped.set()
         return self._stopped.wait(timeout)
 
@@ -133,6 +160,8 @@ class PacketCaptureService:
                 "seq": None,
                 "ack": None,
             },
+            "pid": None,
+            "process_name": "",
         }
 
         try:
@@ -163,8 +192,68 @@ class PacketCaptureService:
                 summary["raw"]["dst_port"] = getattr(udp, "dport", None)
             elif packet.haslayer("ICMP"):
                 summary["proto"] = "ICMP"
+
+            summary.update(self._resolve_process_meta(summary))
         except Exception as exc:  # noqa: BLE001
             summary["malformed"] = True
             summary["parse_error"] = str(exc)
 
         return summary
+
+    def _refresh_connection_index(self) -> None:
+        now = time.monotonic()
+        if now - self._conn_index_refreshed_at < 2.0:
+            return
+        cache: dict[tuple[str, int], dict[str, Any]] = {}
+        for conn in psutil.net_connections(kind="inet"):
+            if not conn.laddr:
+                continue
+            laddr = conn.laddr
+            key = (str(getattr(laddr, "ip", "")), int(getattr(laddr, "port", 0)))
+            if key[1] <= 0:
+                continue
+            pid = int(conn.pid) if conn.pid else None
+            process_name = ""
+            if pid:
+                try:
+                    process_name = psutil.Process(pid).name()
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    process_name = ""
+            cache[key] = {"pid": pid, "process_name": process_name}
+        self._conn_index = cache
+        self._conn_index_refreshed_at = now
+
+    def _resolve_process_meta(self, packet_summary: dict[str, Any]) -> dict[str, Any]:
+        self._refresh_connection_index()
+        src = str(packet_summary.get("src") or "")
+        dst = str(packet_summary.get("dst") or "")
+        src_port = packet_summary.get("raw", {}).get("src_port")
+        dst_port = packet_summary.get("raw", {}).get("dst_port")
+
+        candidates: list[tuple[str, int]] = []
+        if isinstance(src_port, int):
+            candidates.append((src, src_port))
+            candidates.append(("0.0.0.0", src_port))
+            candidates.append(("::", src_port))
+        if isinstance(dst_port, int):
+            candidates.append((dst, dst_port))
+            candidates.append(("0.0.0.0", dst_port))
+            candidates.append(("::", dst_port))
+
+        for key in candidates:
+            meta = self._conn_index.get(key)
+            if meta:
+                return {
+                    "pid": meta.get("pid"),
+                    "process_name": meta.get("process_name", ""),
+                }
+        return {"pid": None, "process_name": ""}
+
+
+def derive_lan_cidr(ipv4: str) -> str | None:
+    """Best-effort /24 LAN block derivation from local IPv4."""
+    try:
+        network = ipaddress.ip_network(f"{ipv4}/24", strict=False)
+    except ValueError:
+        return None
+    return str(network)
