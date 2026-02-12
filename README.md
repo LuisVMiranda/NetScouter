@@ -114,6 +114,15 @@ If the stream does not start, run with elevated privileges and ensure packet-cap
 - Windows: run shell as Administrator and install Npcap.
 - Linux/macOS: run with sudo or grant packet capabilities.
 
+
+### Ops automation and LAN monitor
+
+- **Conditional Automations** (Ops/Schedule): optional auto-response for repeated high-risk activity.
+  - Toggle **Enable auto-response** on/off.
+  - Set high-risk hit threshold.
+  - Choose action (`quarantine` or `banish`).
+- **LAN Device Monitor** (Ops/Schedule): discover local devices, inspect IoT anomalies, and trigger per-device containment actions.
+
 ## Live packet streaming permissions
 
 NetScouter can stream packets live with Scapy. Raw packet sniffing generally requires elevated privileges:

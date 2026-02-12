@@ -10,12 +10,14 @@ import os
 import platform
 import queue
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
+import psutil
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from netscouter.analytics.timeline import (
@@ -53,6 +55,7 @@ from netscouter.intel.packet_signals import evaluate_packet_signals
 from netscouter.scanner.engine import ScanJob, ScanResult, scan_established_connections, scan_targets
 from netscouter.scanner.honeypot import LocalHoneypot
 from netscouter.scanner.packet_stream import PacketCaptureService
+from netscouter.scanner.lan_mapper import DeviceRegistry, correlate_iot_outbound_anomalies, discover_lan_devices
 from netscouter.scheduler.jobs import get_schedule_events, log_schedule_event
 
 DARK_THEME = {
@@ -170,6 +173,14 @@ class NetScouterApp(ctk.CTk):
         self._last_firewall_status_fetch = 0.0
         self._table_tooltip: ctk.CTkToplevel | None = None
         self._table_tooltip_label: ctk.CTkLabel | None = None
+        self.stop_all_requested = False
+        self.device_registry = DeviceRegistry()
+        self.discovered_devices: list[dict[str, str]] = []
+        self.lan_anomalies: list[dict[str, str | int]] = []
+        self.automation_enabled_var = ctk.BooleanVar(value=False)
+        self.automation_threshold_var = ctk.StringVar(value="2")
+        self.automation_action_var = ctk.StringVar(value="quarantine")
+        self.automation_triggered_ips: set[str] = set()
 
         self._configure_grid()
         self._build_layout()
@@ -325,6 +336,7 @@ class NetScouterApp(ctk.CTk):
 
     def _build_ops_schedule_tab(self, pane: ctk.CTkFrame) -> None:
         pane.grid_columnconfigure(0, weight=1)
+        pane.grid_rowconfigure(3, weight=1)
 
         self.ops_row = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         self.ops_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
@@ -334,15 +346,51 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkButton(self.ops_row, text="Stop Recurring", corner_radius=10, command=self.stop_recurring_scan, width=120).grid(row=0, column=3, padx=6, pady=8)
         self.ops_refresh_firewall_button = ctk.CTkButton(self.ops_row, text="Refresh Firewall", corner_radius=10, command=self.refresh_firewall_insight, width=140)
         self.ops_refresh_firewall_button.grid(row=0, column=4, padx=6, pady=8)
-        ctk.CTkLabel(self.ops_row, text="Firewall:").grid(row=0, column=5, padx=(10, 4), pady=8)
-        ctk.CTkLabel(self.ops_row, textvariable=self.firewall_status_var, width=340, anchor="w").grid(row=0, column=6, padx=4, pady=8, sticky="w")
+        ctk.CTkButton(self.ops_row, text="STOP ALL", corner_radius=10, command=self.stop_all_tasks, width=110, fg_color="#DC2626", hover_color="#B91C1C").grid(row=0, column=5, padx=6, pady=8)
+        ctk.CTkLabel(self.ops_row, text="Firewall:").grid(row=0, column=6, padx=(10, 4), pady=8)
+        ctk.CTkLabel(self.ops_row, textvariable=self.firewall_status_var, width=300, anchor="w").grid(row=0, column=7, padx=4, pady=8, sticky="w")
+
+        automation_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        automation_card.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
+        ctk.CTkLabel(automation_card, text="Conditional Automations", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+        ctk.CTkCheckBox(automation_card, text="Enable auto-response", variable=self.automation_enabled_var).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkLabel(automation_card, text="High-risk threshold").grid(row=0, column=2, padx=(12, 4), pady=6)
+        ctk.CTkEntry(automation_card, width=70, textvariable=self.automation_threshold_var, placeholder_text="2").grid(row=0, column=3, padx=4, pady=6)
+        ctk.CTkLabel(automation_card, text="Action").grid(row=0, column=4, padx=(12, 4), pady=6)
+        ctk.CTkOptionMenu(automation_card, values=["quarantine", "banish"], variable=self.automation_action_var, width=120).grid(row=0, column=5, padx=4, pady=6)
+
+        lan_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        lan_card.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        lan_card.grid_columnconfigure(0, weight=1)
+        lan_card.grid_rowconfigure(2, weight=1)
+
+        header = self._register_card(ctk.CTkFrame(lan_card, corner_radius=10))
+        header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
+        ctk.CTkLabel(header, text="LAN Device Monitor", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
+        ctk.CTkButton(header, text="Discover Devices", width=130, command=self.refresh_lan_devices).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkButton(header, text="Show IoT Anomalies", width=140, command=self.show_lan_anomalies).grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkButton(header, text="Quarantine Device IP", width=150, command=self.quarantine_selected_lan_device).grid(row=0, column=3, padx=6, pady=6)
+        ctk.CTkButton(header, text="Banish Device IP", width=130, command=self.banish_selected_lan_device).grid(row=0, column=4, padx=6, pady=6)
+
+        self.lan_status_var = ctk.StringVar(value="No discovery yet")
+        ctk.CTkLabel(lan_card, textvariable=self.lan_status_var, anchor="w").grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
+
+        columns = ("ip", "hostname", "vendor", "type", "mac")
+        self.lan_table = ttk.Treeview(lan_card, columns=columns, show="headings", selectmode="browse", height=8)
+        headings = {"ip": "IP", "hostname": "Hostname", "vendor": "Vendor", "type": "Type", "mac": "MAC"}
+        widths = {"ip": 150, "hostname": 200, "vendor": 220, "type": 90, "mac": 150}
+        for col in columns:
+            self.lan_table.heading(col, text=headings[col])
+            self.lan_table.column(col, width=widths[col], anchor="center")
+        y_scroll = ttk.Scrollbar(lan_card, orient="vertical", command=self.lan_table.yview, style="NetScouter.Vertical.TScrollbar")
+        self.lan_table.configure(yscrollcommand=y_scroll.set)
+        self.lan_table.grid(row=2, column=0, sticky="nsew", padx=(8, 0), pady=(0, 8))
+        y_scroll.grid(row=2, column=1, sticky="ns", padx=(0, 8), pady=(0, 8))
 
         ops_actions = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
-        ops_actions.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
-        ctk.CTkButton(ops_actions, text="Banish Selected IP", corner_radius=10, command=self.banish_selected_ip, width=160).grid(row=0, column=0, padx=8, pady=10)
-        ctk.CTkButton(ops_actions, text="Quarantine Selected IP", corner_radius=10, command=self.quarantine_selected_ip, width=180).grid(row=0, column=1, padx=8, pady=10)
-        ctk.CTkButton(ops_actions, text="Export AI Audit", corner_radius=10, command=self.export_ai_audit, width=140).grid(row=0, column=2, padx=8, pady=10)
-        ctk.CTkButton(ops_actions, text="Export XLSX", corner_radius=10, command=self.export_xlsx, width=120).grid(row=0, column=3, padx=8, pady=10)
+        ops_actions.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
+        ctk.CTkButton(ops_actions, text="Export AI Audit", corner_radius=10, command=self.export_ai_audit, width=140).grid(row=0, column=0, padx=8, pady=10)
+        ctk.CTkButton(ops_actions, text="Export XLSX", corner_radius=10, command=self.export_xlsx, width=120).grid(row=0, column=1, padx=8, pady=10)
 
     def _build_results_table(self, parent: ctk.CTkFrame, row: int) -> None:
         self.table_card = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
@@ -363,7 +411,7 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkButton(self.filter_row, text="Clear Filters", corner_radius=10, width=120, command=self.clear_filters).grid(row=0, column=4, padx=6, pady=8)
         ctk.CTkButton(self.filter_row, text="Clear Scan Logs", corner_radius=10, width=130, command=self.clear_scan_logs).grid(row=0, column=5, padx=6, pady=8)
         ctk.CTkButton(self.filter_row, text="Start Live Packet Stream", corner_radius=10, width=180, command=self.start_live_packet_stream).grid(row=0, column=6, padx=6, pady=8)
-        ctk.CTkButton(self.filter_row, text="Stop", corner_radius=10, width=80, command=self.stop_live_packet_stream).grid(row=0, column=7, padx=6, pady=8)
+        ctk.CTkButton(self.filter_row, text="STOP ALL", corner_radius=10, width=90, command=self.stop_all_tasks).grid(row=0, column=7, padx=6, pady=8)
         ctk.CTkButton(self.filter_row, text="Export packet slice", corner_radius=10, width=150, command=self.export_packet_slice).grid(row=0, column=8, padx=6, pady=8)
         ctk.CTkButton(self.filter_row, text="◀", width=38, command=self._prev_table_page).grid(row=0, column=9, padx=(6, 2), pady=8)
         ctk.CTkButton(self.filter_row, text="▶", width=38, command=self._next_table_page).grid(row=0, column=10, padx=(2, 6), pady=8)
@@ -969,12 +1017,152 @@ class NetScouterApp(ctk.CTk):
         if self._table_tooltip and self._table_tooltip.winfo_exists():
             self._table_tooltip.withdraw()
 
+    def _detect_local_ip(self) -> tuple[str, str]:
+        ipv4 = "n/a"
+        ipv6 = "n/a"
+        for iface in psutil.net_if_addrs().values():
+            for addr in iface:
+                if getattr(addr, "family", None) == socket.AF_INET:
+                    if addr.address and not addr.address.startswith("127."):
+                        ipv4 = addr.address
+                elif getattr(addr, "family", None) == socket.AF_INET6:
+                    if addr.address and not addr.address.startswith("::1"):
+                        ipv6 = addr.address.split("%", maxsplit=1)[0]
+            if ipv4 != "n/a" and ipv6 != "n/a":
+                break
+        return ipv4, ipv6
+
     def show_local_network_info(self) -> None:
         context = resolve_local_network_context()
-        local_ip = context.get("local_ip", "n/a")
-        public_ip = context.get("public_ip", "n/a")
-        self.local_info_var.set(f"LAN {local_ip} | WAN {public_ip}")
-        self._log(f"Local network info: LAN={local_ip} WAN={public_ip}")
+        lan_ipv4, lan_ipv6 = self._detect_local_ip()
+        public_ip = context.get("public_ip", "Unknown")
+        self.local_info_var.set(f"IPv4 {lan_ipv4} | IPv6 {lan_ipv6} | WAN {public_ip}")
+        self._log(f"Local network info: IPv4={lan_ipv4} IPv6={lan_ipv6} WAN={public_ip}")
+
+    def stop_all_tasks(self) -> None:
+        stopped: list[str] = []
+        if self.scan_job is not None:
+            try:
+                self.scan_job.cancel()
+                stopped.append("scan")
+            except Exception:
+                pass
+            self.scan_job = None
+        if self.packet_service.is_running:
+            self.stop_live_packet_stream()
+            stopped.append("packet stream")
+        if self.ai_job_thread and self.ai_job_thread.is_alive():
+            self.cancel_ai_analysis()
+            stopped.append("AI analysis")
+        self._set_scan_running(False)
+        if not stopped:
+            self._log("STOP ALL: no active tasks found")
+        else:
+            self._log(f"STOP ALL: stopped {', '.join(stopped)}")
+
+    def refresh_lan_devices(self) -> None:
+        self.lan_status_var.set("Discovering LAN devices...")
+        threading.Thread(target=self._refresh_lan_devices_worker, daemon=True, name="lan-discovery").start()
+
+    def _refresh_lan_devices_worker(self) -> None:
+        try:
+            devices = discover_lan_devices(max_hosts=256)
+        except Exception as exc:  # noqa: BLE001
+            self.after(0, lambda: self.lan_status_var.set(f"LAN discovery failed: {exc}"))
+            return
+
+        now = datetime.now()
+        for dev in devices:
+            self.device_registry.upsert(
+                ip=str(dev.get("ip", "")),
+                mac=str(dev.get("mac", "")),
+                hostname=str(dev.get("hostname", "Unknown")),
+                vendor=str(dev.get("vendor", "Unknown")),
+                device_type=str(dev.get("device_type", "unknown")),
+                seen_at=now,
+            )
+        self.discovered_devices = self.device_registry.devices
+        self.lan_anomalies = correlate_iot_outbound_anomalies(self.device_registry)
+        self.after(0, self._render_lan_table)
+        self.after(0, lambda: self._log(f"LAN discovery complete: {len(self.discovered_devices)} devices, {len(self.lan_anomalies)} IoT anomalies"))
+
+    def _render_lan_table(self) -> None:
+        for item in self.lan_table.get_children():
+            self.lan_table.delete(item)
+        for dev in self.discovered_devices:
+            self.lan_table.insert(
+                "",
+                "end",
+                values=(
+                    str(dev.get("ip", "")),
+                    str(dev.get("hostname", "Unknown")),
+                    str(dev.get("vendor", "Unknown")),
+                    str(dev.get("device_type", "unknown")),
+                    str(dev.get("mac", "")),
+                ),
+            )
+        self.lan_status_var.set(f"Discovered {len(self.discovered_devices)} devices | IoT anomalies {len(self.lan_anomalies)}")
+
+    def show_lan_anomalies(self) -> None:
+        if not self.lan_anomalies:
+            self._log("LAN anomalies: none detected yet")
+            messagebox.showinfo("LAN Anomalies", "No IoT outbound anomalies detected.")
+            return
+        lines = []
+        for item in self.lan_anomalies[:20]:
+            lines.append(
+                f"{item.get('risk')} | {item.get('local_ip')} -> {item.get('remote_ip')}:{item.get('remote_port')} | {item.get('reason')}"
+            )
+        messagebox.showinfo("LAN Anomalies", "\n".join(lines))
+
+    def _selected_lan_ip(self) -> str | None:
+        selection = self.lan_table.selection()
+        if not selection:
+            return None
+        values = self.lan_table.item(selection[0], "values")
+        if not values:
+            return None
+        return str(values[0]).strip() or None
+
+    def quarantine_selected_lan_device(self) -> None:
+        ip = self._selected_lan_ip()
+        if not ip:
+            self._log("Select a LAN device row first")
+            return
+        threading.Thread(target=self._quarantine_ip_worker, args=(ip,), daemon=True, name="lan-quarantine").start()
+
+    def banish_selected_lan_device(self) -> None:
+        ip = self._selected_lan_ip()
+        if not ip:
+            self._log("Select a LAN device row first")
+            return
+        threading.Thread(target=self._banish_ip_worker, args=(ip,), daemon=True, name="lan-banish").start()
+
+    def _automation_threshold(self) -> int:
+        try:
+            return max(1, int(self.automation_threshold_var.get().strip()))
+        except ValueError:
+            return 2
+
+    def _evaluate_conditional_automation(self, payload: dict[str, str | int | list[str]]) -> None:
+        if not self.automation_enabled_var.get():
+            return
+        remote_ip = str(payload.get("remote_ip", "")).strip()
+        if not remote_ip or remote_ip in self.automation_triggered_ips:
+            return
+        if str(payload.get("risk", "")).lower() != "high":
+            return
+        high_count = sum(1 for row in self.scan_results if str(row.get("remote_ip", "")).strip() == remote_ip and str(row.get("risk", "")).lower() == "high")
+        if high_count < self._automation_threshold():
+            return
+
+        self.automation_triggered_ips.add(remote_ip)
+        action = self.automation_action_var.get().strip().lower()
+        self._log(f"🤖 Automation triggered for {remote_ip}: action={action}, high-risk hits={high_count}")
+        if action == "banish":
+            threading.Thread(target=self._banish_ip_worker, args=(remote_ip,), daemon=True, name="auto-banish").start()
+        else:
+            threading.Thread(target=self._quarantine_ip_worker, args=(remote_ip,), daemon=True, name="auto-quarantine").start()
 
     def clear_filters(self) -> None:
         self.status_filter_var.set("All Ports")
@@ -1012,23 +1200,31 @@ class NetScouterApp(ctk.CTk):
         target_ip = selected_ip or self.target_var.get().strip()
         capture_port = self.selected_port if selected_ip else None
         if not target_ip:
-            self._log("Select a row (or set target) before starting packet stream")
+            self._log("Select a row first (or set target) before starting packet stream")
             return
 
-        self._log("Live packet stream prerequisites: run app as Administrator/root for packet capture permissions.")
+        self._log(
+            "Live stream guide: 1) select a row, 2) run app with Administrator/root rights, "
+            "3) ensure Npcap/Scapy packet capture support is installed."
+        )
         try:
             self.packet_service.start(target_ip, port=capture_port)
         except Exception as exc:  # noqa: BLE001
             self.packet_stream_status_var.set("Live stream failed")
-            self._log(f"Live packet stream failed to start: {exc}")
-            self._log("Troubleshooting: ensure Scapy/Npcap is installed and elevated privileges are granted.")
+            self._log(f"Live packet stream failed to start for {target_ip}: {exc}")
+            self._log("Fix: run elevated and install Npcap (Windows) or CAP_NET_RAW/CAP_NET_ADMIN (Linux/macOS).")
+            return
+
+        if not self.packet_service.is_running:
+            self.packet_stream_status_var.set("Live stream inactive")
+            self._log("Live packet stream did not activate. Check OS permissions and capture backend.")
             return
 
         self.packet_alert_cache.clear()
         stream_target = f"{target_ip}:{capture_port}" if capture_port else target_ip
         self.packet_stream_status_var.set(f"Streaming {stream_target}")
         self.packet_detail_header_var.set(f"Packet detail panel for {target_ip}")
-        self._log(f"Live packet stream started for {stream_target}")
+        self._log(f"Live packet stream started for {stream_target}. Packet logs appear in packet detail panel.")
         self.after(350, self._poll_packet_stream)
 
     def stop_live_packet_stream(self) -> None:
@@ -1115,6 +1311,7 @@ class NetScouterApp(ctk.CTk):
 
             self.scan_results.append(payload)
             append_scan_result(payload)
+            self._evaluate_conditional_automation(payload)
 
             if processed % 4 == 0:
                 self._log(f"Port {payload['port']} on {payload['remote_ip']}: {payload['status']} | Risk {payload['risk']}")
