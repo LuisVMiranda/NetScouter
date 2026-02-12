@@ -107,6 +107,8 @@ Defined in `pyproject.toml`:
 2. Click **Start Live Packet Stream**.
 3. Read updates in the packet detail panel (double-click a row for full report).
 4. Use **Export packet slice** for JSON evidence capture.
+5. Use **Clear Scan Logs** to wipe both table rows and console logs when starting a fresh investigation.
+6. Use **Local Info** in Dashboard to display current LAN/WAN addresses.
 
 If the stream does not start, run with elevated privileges and ensure packet-capture drivers are present:
 - Windows: run shell as Administrator and install Npcap.
