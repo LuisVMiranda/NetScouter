@@ -118,6 +118,8 @@ class NetScouterApp(ctk.CTk):
         self.is_scan_running = False
         self.active_scan_id = 0
         self.log_line_count = 0
+        self.intel_log_line_count = 0
+        self.packet_log_line_count = 0
         self.packet_service = PacketCaptureService(max_packets=1200)
         self.honeypot = LocalHoneypot()
         self.packet_alert_cache: set[str] = set()
@@ -186,6 +188,7 @@ class NetScouterApp(ctk.CTk):
         self.automation_triggered_ips: set[str] = set()
         self.packet_stream_mode_var = ctk.StringVar(value="Selected Row")
         self.packet_scope_hint_var = ctk.StringVar(value="Scope: select a row or set target host")
+        self.local_info_visible = False
 
         self._configure_grid()
         self._build_layout()
@@ -295,16 +298,25 @@ class NetScouterApp(ctk.CTk):
         self.scan_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
         self.scan_row.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(self.scan_row, text="Target").grid(row=0, column=0, padx=6, pady=8, sticky="w")
-        ctk.CTkEntry(self.scan_row, textvariable=self.target_var, placeholder_text="127.0.0.1 or hostname").grid(row=0, column=1, padx=6, pady=8, sticky="ew")
-        ctk.CTkLabel(self.scan_row, text="Port Range").grid(row=0, column=2, padx=6, pady=8, sticky="w")
-        ctk.CTkEntry(self.scan_row, width=140, textvariable=self.port_range_var, placeholder_text="20-1024").grid(row=0, column=3, padx=6, pady=8)
+        ctk.CTkEntry(self.scan_row, textvariable=self.target_var, placeholder_text="127.0.0.1 or hostname").grid(row=0, column=1, columnspan=3, padx=6, pady=8, sticky="ew")
+        ctk.CTkLabel(self.scan_row, text="Port Range").grid(row=0, column=4, padx=6, pady=8, sticky="w")
+        ctk.CTkEntry(self.scan_row, width=140, textvariable=self.port_range_var, placeholder_text="20-1024").grid(row=0, column=5, padx=6, pady=8)
+
         self.scan_button = ctk.CTkButton(self.scan_row, text="Scan", corner_radius=10, command=self.start_scan, width=110)
-        self.scan_button.grid(row=0, column=4, padx=6, pady=8)
+        self.scan_button.grid(row=1, column=0, padx=6, pady=8)
         self.scan_established_button = ctk.CTkButton(self.scan_row, text="Scan ESTABLISHED", corner_radius=10, command=self.start_established_scan, width=150)
-        self.scan_established_button.grid(row=0, column=5, padx=6, pady=8)
-        ctk.CTkButton(self.scan_row, text="Show Charts", corner_radius=10, command=self.show_charts, width=110).grid(row=0, column=6, padx=6, pady=8)
-        ctk.CTkButton(self.scan_row, text="Local Info", corner_radius=10, command=self.show_local_network_info, width=110).grid(row=0, column=7, padx=6, pady=8)
-        ctk.CTkLabel(self.scan_row, textvariable=self.local_info_var, anchor="w", width=320).grid(row=0, column=8, padx=6, pady=8, sticky="w")
+        self.scan_established_button.grid(row=1, column=1, padx=6, pady=8, sticky="w")
+        ctk.CTkButton(self.scan_row, text="Show Charts", corner_radius=10, command=self.show_charts, width=110).grid(row=1, column=2, padx=6, pady=8)
+        self.local_info_button = ctk.CTkButton(self.scan_row, text="Show Local Info", corner_radius=10, command=self.toggle_local_network_info, width=140)
+        self.local_info_button.grid(row=1, column=3, padx=6, pady=8)
+
+        ctk.CTkLabel(
+            self.scan_row,
+            textvariable=self.local_info_var,
+            anchor="w",
+            justify="left",
+            wraplength=980,
+        ).grid(row=2, column=0, columnspan=6, padx=8, pady=(0, 8), sticky="ew")
 
         self._build_results_table(pane, row=2)
 
@@ -331,6 +343,7 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkEntry(self.settings_row, width=260, textvariable=self.abuseipdb_key_var, placeholder_text="e.g. 1f2a...abuseipdb-token").grid(row=0, column=1, padx=4, pady=8)
         ctk.CTkLabel(self.settings_row, text="VirusTotal key").grid(row=0, column=2, padx=(8, 4), pady=8, sticky="w")
         ctk.CTkEntry(self.settings_row, width=260, textvariable=self.virustotal_key_var, placeholder_text="e.g. 5ab3...virustotal-api-key").grid(row=0, column=3, padx=4, pady=8)
+        ctk.CTkLabel(self.settings_row, text="(API v3 key from VirusTotal profile)", anchor="w").grid(row=0, column=8, padx=(4, 8), pady=8, sticky="w")
         ctk.CTkLabel(self.settings_row, text="AlienVault OTX key").grid(row=1, column=0, padx=(8, 4), pady=8, sticky="w")
         ctk.CTkEntry(self.settings_row, width=260, textvariable=self.otx_key_var, placeholder_text="e.g. 7cd9...otx-token").grid(row=1, column=1, padx=4, pady=8)
         ctk.CTkLabel(self.settings_row, text="Consensus Threshold").grid(row=1, column=2, padx=(8, 4), pady=8)
@@ -411,6 +424,7 @@ class NetScouterApp(ctk.CTk):
         self.table_card = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
         self.table_card.grid(row=row, column=0, sticky="nsew", padx=8, pady=(0, 8))
         self.table_card.grid_rowconfigure(1, weight=1)
+        self.table_card.grid_rowconfigure(4, weight=0)
         self.table_card.grid_columnconfigure(0, weight=1)
 
         self.filter_row = self._register_card(ctk.CTkFrame(self.table_card, corner_radius=10))
@@ -424,11 +438,12 @@ class NetScouterApp(ctk.CTk):
         self.risk_filter.grid(row=0, column=2, padx=6, pady=8)
         ctk.CTkCheckBox(self.filter_row, text="Established-only", variable=self.established_only_var, command=self._rerender_table).grid(row=0, column=3, padx=6, pady=8)
         ctk.CTkButton(self.filter_row, text="Clear Filters", corner_radius=10, width=120, command=self.clear_filters).grid(row=0, column=4, padx=6, pady=8)
-        ctk.CTkButton(self.filter_row, text="Clear Scan Logs", corner_radius=10, width=130, command=self.clear_scan_logs).grid(row=0, column=5, padx=6, pady=8)
         ctk.CTkOptionMenu(self.filter_row, values=["Selected Row", "Target Host", "Local Network"], variable=self.packet_stream_mode_var, width=140, command=self._on_packet_scope_changed).grid(row=0, column=6, padx=6, pady=8)
         ctk.CTkButton(self.filter_row, text="Start Live Packet Stream", corner_radius=10, width=180, command=self.start_live_packet_stream).grid(row=0, column=7, padx=6, pady=8)
         ctk.CTkButton(self.filter_row, text="STOP ALL", corner_radius=10, width=90, command=self.stop_all_tasks).grid(row=0, column=8, padx=6, pady=8)
         ctk.CTkButton(self.filter_row, text="Export packet slice", corner_radius=10, width=150, command=self.export_packet_slice).grid(row=0, column=9, padx=6, pady=8)
+        ctk.CTkButton(self.filter_row, text="Clear Scan Logs", corner_radius=10, width=130, command=self.clear_scan_logs).grid(row=1, column=0, padx=6, pady=(0, 8), sticky="w")
+        ctk.CTkButton(self.filter_row, text="Show/Hide Local Info", corner_radius=10, width=160, command=self.toggle_local_network_info).grid(row=1, column=1, padx=6, pady=(0, 8), sticky="w")
         ctk.CTkButton(self.filter_row, text="◀", width=38, command=self._prev_table_page).grid(row=0, column=10, padx=(6, 2), pady=8)
         ctk.CTkButton(self.filter_row, text="▶", width=38, command=self._next_table_page).grid(row=0, column=11, padx=(2, 6), pady=8)
 
@@ -467,6 +482,21 @@ class NetScouterApp(ctk.CTk):
         self.packet_detail_box = ctk.CTkTextbox(self.packet_detail_card, corner_radius=10, height=140)
         self.packet_detail_box.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
 
+        self.dashboard_console_card = self._register_card(ctk.CTkFrame(self.table_card, corner_radius=10))
+        self.dashboard_console_card.grid(row=4, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
+        self.dashboard_console_card.grid_columnconfigure(0, weight=1)
+        self.dashboard_console_tabs = ctk.CTkTabview(self.dashboard_console_card, corner_radius=10, height=180)
+        self.dashboard_console_tabs.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+        regular_tab = self.dashboard_console_tabs.add("Regular Logs")
+        packet_tab = self.dashboard_console_tabs.add("Packet Stream")
+        self.dashboard_console_tabs.set("Regular Logs")
+        regular_tab.grid_columnconfigure(0, weight=1)
+        packet_tab.grid_columnconfigure(0, weight=1)
+        self.dashboard_console = ctk.CTkTextbox(regular_tab, corner_radius=10, height=150)
+        self.dashboard_console.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
+        self.packet_stream_console = ctk.CTkTextbox(packet_tab, corner_radius=10, height=150)
+        self.packet_stream_console.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
+
     def _build_console(self, parent: ctk.CTkFrame, row: int, *, compact: bool = False) -> None:
         self.console_card = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
         self.console_card.grid(row=row, column=0, sticky="nsew", padx=8, pady=(0, 8))
@@ -476,9 +506,9 @@ class NetScouterApp(ctk.CTk):
         header = self._register_card(ctk.CTkFrame(self.console_card, corner_radius=10))
         header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
         ctk.CTkLabel(header, text="Console Logs").grid(row=0, column=0, sticky="w", padx=6, pady=6)
-        ctk.CTkButton(header, text="Clear Logs", width=110, command=self.clear_scan_logs).grid(row=0, column=1, padx=6, pady=6)
-        self.console = ctk.CTkTextbox(self.console_card, corner_radius=10, height=180 if compact else 320)
-        self.console.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        ctk.CTkButton(header, text="Clear Logs", width=110, command=self.clear_intelligence_logs).grid(row=0, column=1, padx=6, pady=6)
+        self.intelligence_console = ctk.CTkTextbox(self.console_card, corner_radius=10, height=180 if compact else 320)
+        self.intelligence_console.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
 
     def _build_ai_auditor_tab(self, pane: ctk.CTkFrame) -> None:
         pane.grid_columnconfigure(0, weight=1)
@@ -723,7 +753,7 @@ class NetScouterApp(ctk.CTk):
         os.environ["ABUSEIPDB_API_KEY"] = self.abuseipdb_key_var.get().strip()
         os.environ["VIRUSTOTAL_API_KEY"] = self.virustotal_key_var.get().strip()
         os.environ["OTX_API_KEY"] = self.otx_key_var.get().strip()
-        self._log("Settings applied (API keys, consensus threshold, reputation timeout, AI timeout, auto-block preference)")
+        self._intel_log("Settings applied (API keys, consensus threshold, reputation timeout, AI timeout, auto-block preference)")
 
     def _consensus_threshold(self) -> int:
         try:
@@ -931,8 +961,10 @@ class NetScouterApp(ctk.CTk):
         self._render_table_page(self._render_token)
 
     def clear_scan_logs(self) -> None:
-        self.console.delete("1.0", "end")
+        self.dashboard_console.delete("1.0", "end")
+        self.packet_stream_console.delete("1.0", "end")
         self.log_line_count = 0
+        self.packet_log_line_count = 0
         self.scan_results.clear()
         self.filtered_rows.clear()
         self._table_item_lookup.clear()
@@ -1070,6 +1102,16 @@ class NetScouterApp(ctk.CTk):
         public_ip = context.get("public_ip", "Unknown")
         self.local_info_var.set(f"IPv4 {lan_ipv4} | IPv6 {lan_ipv6} | WAN {public_ip}")
         self._log(f"Local network info: IPv4={lan_ipv4} IPv6={lan_ipv6} WAN={public_ip}")
+
+    def toggle_local_network_info(self) -> None:
+        if self.local_info_visible:
+            self.local_info_visible = False
+            self.local_info_var.set("Local network info hidden")
+            self.local_info_button.configure(text="Show Local Info")
+            return
+        self.local_info_visible = True
+        self.show_local_network_info()
+        self.local_info_button.configure(text="Hide Local Info")
 
     def stop_all_tasks(self) -> None:
         stopped: list[str] = []
@@ -1266,6 +1308,37 @@ class NetScouterApp(ctk.CTk):
         else:
             self.packet_scope_hint_var.set("Scope: selected table row connection")
 
+    def _ensure_scapy_available(self) -> tuple[bool, str]:
+        if importlib.util.find_spec("scapy") is not None:
+            return True, "Scapy already available"
+
+        python_executable = sys.executable or "python"
+        os_name = platform.system().lower()
+        if os_name == "windows":
+            self._packet_log("Scapy missing: installing for Windows (requires Npcap driver separately).")
+        elif os_name == "linux":
+            self._packet_log("Scapy missing: installing for Linux (capture still requires CAP_NET_RAW/CAP_NET_ADMIN).")
+        elif os_name == "darwin":
+            self._packet_log("Scapy missing: installing for macOS (capture still requires elevated permissions).")
+        else:
+            self._packet_log("Scapy missing: attempting generic pip installation.")
+
+        proc = subprocess.run(
+            [python_executable, "-m", "pip", "install", "scapy"],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env={**os.environ, "PIP_DISABLE_PIP_VERSION_CHECK": "1"},
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            return False, err or "Failed to install scapy"
+        if importlib.util.find_spec("scapy") is None:
+            return False, "pip install reported success but scapy import was not found"
+        return True, "Scapy installed"
+
     def start_live_packet_stream(self) -> None:
         mode = self.packet_stream_mode_var.get()
         selected_ip = self.selected_remote_ip
@@ -1286,7 +1359,7 @@ class NetScouterApp(ctk.CTk):
             self._log("Select a row first (or set target) before starting packet stream")
             return
 
-        self._log(
+        self._packet_log(
             "Live stream guide: 1) choose stream scope, 2) run app with Administrator/root rights, "
             "3) ensure Npcap + WinPcap compatibility (Windows) or CAP_NET_RAW/CAP_NET_ADMIN (Linux/macOS)."
         )
@@ -1298,14 +1371,36 @@ class NetScouterApp(ctk.CTk):
                 mode="local_network" if mode == "Local Network" else "remote",
             )
         except Exception as exc:  # noqa: BLE001
-            self.packet_stream_status_var.set("Live stream failed")
-            self._log(f"Live packet stream failed to start for {target_ip}: {exc}")
-            self._log("Fix checklist: run elevated, install capture driver, disable strict endpoint security hook blocking.")
-            return
+            message = str(exc)
+            if "Scapy is unavailable" in message:
+                self._packet_log("Scapy dependency missing. Attempting automatic installation...")
+                ok, status = self._ensure_scapy_available()
+                if ok:
+                    self._packet_log("Scapy installed successfully. Retrying stream startup...")
+                    try:
+                        self.packet_service.start(
+                            target_ip,
+                            port=capture_port,
+                            network_cidr=network_cidr,
+                            mode="local_network" if mode == "Local Network" else "remote",
+                        )
+                    except Exception as retry_exc:  # noqa: BLE001
+                        self.packet_stream_status_var.set("Live stream failed")
+                        self._packet_log(f"Live packet stream failed after installation retry: {retry_exc}")
+                        return
+                else:
+                    self.packet_stream_status_var.set("Live stream failed")
+                    self._packet_log(f"Automatic Scapy installation failed: {status}")
+                    return
+            else:
+                self.packet_stream_status_var.set("Live stream failed")
+                self._packet_log(f"Live packet stream failed to start for {target_ip}: {exc}")
+                self._packet_log("Fix checklist: run elevated, install capture driver, disable strict endpoint security hook blocking.")
+                return
 
         if not self.packet_service.is_running:
-            self.packet_stream_status_var.set("Live stream inactive")
-            self._log("Live packet stream did not activate. Check OS permissions and capture backend.")
+            self.packet_stream_status_var.set("Live stream failed")
+            self._packet_log("Live packet stream did not activate. Check OS permissions and capture backend.")
             return
 
         self.packet_alert_cache.clear()
@@ -1313,7 +1408,7 @@ class NetScouterApp(ctk.CTk):
         self.packet_stream_status_var.set(f"Streaming {stream_target}")
         panel_scope = "local network" if mode == "Local Network" else target_ip
         self.packet_detail_header_var.set(f"Packet detail panel for {panel_scope}")
-        self._log(
+        self._packet_log(
             f"Live packet stream started for {stream_target}. Logs appear below with IN/OUT direction, endpoint, and PID when available."
         )
         self.after(350, self._poll_packet_stream)
@@ -1321,14 +1416,14 @@ class NetScouterApp(ctk.CTk):
     def stop_live_packet_stream(self) -> None:
         stopped = self.packet_service.stop()
         if not stopped:
-            self._log("Live packet stream stop timed out")
+            self._packet_log("Live packet stream stop timed out")
         self.packet_stream_status_var.set("Live stream idle")
-        self._log("Live packet stream stopped")
+        self._packet_log("Live packet stream stopped")
 
     def export_packet_slice(self) -> None:
         ip = None if self.packet_service.mode == "local_network" else (self.selected_remote_ip or self.packet_service.remote_ip)
         if not ip:
-            self._log("Exporting full local stream slice")
+            self._packet_log("Exporting full local stream slice")
 
         path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
         if not path:
@@ -1336,7 +1431,7 @@ class NetScouterApp(ctk.CTk):
 
         count = self.packet_service.export_packets(path, remote_ip=ip, limit=PACKET_SLICE_LIMIT)
         scope = ip or "local-network"
-        self._log(f"Exported {count} packets for {scope} to {path}")
+        self._packet_log(f"Exported {count} packets for {scope} to {path}")
 
     def _poll_packet_stream(self) -> None:
         if not self.packet_service.is_running:
@@ -1355,6 +1450,8 @@ class NetScouterApp(ctk.CTk):
 
         if not packets:
             self.packet_detail_box.insert("1.0", "No packets captured yet for this host.")
+            self.packet_stream_console.delete("1.0", "end")
+            self.packet_stream_console.insert("1.0", "No packets captured yet for this host.")
             return
 
         lines = []
@@ -1371,6 +1468,8 @@ class NetScouterApp(ctk.CTk):
                 f"pid={pid} proc={proc} malformed={packet.get('malformed')} error={packet.get('parse_error')}"
             )
         self.packet_detail_box.insert("1.0", "\n".join(lines))
+        self.packet_stream_console.delete("1.0", "end")
+        self.packet_stream_console.insert("1.0", "\n".join(lines))
 
         alert_target = remote_ip if remote_ip else "local-network"
         alerts = evaluate_packet_signals(alert_target, packets)
@@ -1380,7 +1479,7 @@ class NetScouterApp(ctk.CTk):
         for alert in alerts:
             if alert not in self.packet_alert_cache:
                 self.packet_alert_cache.add(alert)
-                self._log(f"[Packet Alert] {alert}")
+                self._packet_log(f"[Packet Alert] {alert}")
 
     def _escalate_risk_for_ip(self, remote_ip: str) -> None:
         changed = False
@@ -1457,7 +1556,7 @@ class NetScouterApp(ctk.CTk):
 
     def refresh_firewall_insight(self) -> None:
         if self.firewall_refresh_in_progress:
-            self._log("Firewall insight refresh already running")
+            self._intel_log("Firewall insight refresh already running")
             return
         self.firewall_refresh_in_progress = True
         self.firewall_status_var.set("Refreshing firewall status...")
@@ -1471,7 +1570,7 @@ class NetScouterApp(ctk.CTk):
         action = "enable" if enabled else "disable"
         confirm = messagebox.askyesno("Confirm Firewall Toggle", f"Do you want to {action} the firewall?")
         if not confirm:
-            self._log(f"Firewall toggle cancelled ({action}).")
+            self._intel_log(f"Firewall toggle cancelled ({action}).")
             return
         threading.Thread(target=self._toggle_firewall_worker, args=(enabled,), daemon=True, name="firewall-toggle").start()
 
@@ -1486,7 +1585,7 @@ class NetScouterApp(ctk.CTk):
             f"Apply '{preset}' preset? Rollback hint: switch to 'normal' preset if needed.",
         )
         if not confirm:
-            self._log(f"Firewall preset cancelled ({preset}).")
+            self._intel_log(f"Firewall preset cancelled ({preset}).")
             return
         threading.Thread(target=self._apply_preset_worker, args=(preset,), daemon=True, name="firewall-preset").start()
 
@@ -1497,7 +1596,7 @@ class NetScouterApp(ctk.CTk):
     def add_custom_rule_from_ui(self) -> None:
         rule_name = self.firewall_rule_name_var.get().strip()
         if not rule_name:
-            self._log("Firewall custom rule: name is required.")
+            self._intel_log("Firewall custom rule: name is required.")
             return
 
         port_text = self.firewall_rule_port_var.get().strip()
@@ -1506,7 +1605,7 @@ class NetScouterApp(ctk.CTk):
             try:
                 port = int(port_text)
             except ValueError:
-                self._log("Firewall custom rule: port must be an integer.")
+                self._intel_log("Firewall custom rule: port must be an integer.")
                 return
 
         threading.Thread(
@@ -1530,7 +1629,7 @@ class NetScouterApp(ctk.CTk):
     def remove_custom_rule_from_ui(self) -> None:
         rule_name = self.firewall_rule_name_var.get().strip()
         if not rule_name:
-            self._log("Firewall custom rule removal: name is required.")
+            self._intel_log("Firewall custom rule removal: name is required.")
             return
 
         confirm = messagebox.askyesno(
@@ -1538,7 +1637,7 @@ class NetScouterApp(ctk.CTk):
             f"Remove firewall rule '{rule_name}'? Rollback hint: re-add with the same name and settings.",
         )
         if not confirm:
-            self._log(f"Firewall custom rule removal cancelled ({rule_name}).")
+            self._intel_log(f"Firewall custom rule removal cancelled ({rule_name}).")
             return
         threading.Thread(target=self._remove_custom_rule_worker, args=(rule_name,), daemon=True, name="firewall-remove-rule").start()
 
@@ -1552,7 +1651,7 @@ class NetScouterApp(ctk.CTk):
             "Run emergency firewall lockdown sequence now? This may disrupt current connections.",
         )
         if not confirm:
-            self._log("Panic button cancelled.")
+            self._intel_log("Panic button cancelled.")
             return
         threading.Thread(target=self._panic_button_worker, daemon=True, name="firewall-panic").start()
 
@@ -1563,7 +1662,7 @@ class NetScouterApp(ctk.CTk):
     def _log_operation_result(self, operation: str, result: dict[str, object]) -> None:
         message = str(result.get("message", result))
         status = "SUCCESS" if bool(result.get("success")) else "FAIL"
-        self._log(f"🛡️ Firewall {operation} [{status}]: {message}")
+        self._intel_log(f"🛡️ Firewall {operation} [{status}]: {message}")
 
         steps = result.get("steps")
         if isinstance(steps, list):
@@ -1573,7 +1672,7 @@ class NetScouterApp(ctk.CTk):
                 step_name = str(step.get("step", f"step-{idx}"))
                 step_ok = "OK" if bool(step.get("success")) else "WARN"
                 note = str(step.get("message") or step.get("action") or "completed")
-                self._log(f"  🧩 {step_name}: {step_ok} ({note})")
+                self._intel_log(f"  🧩 {step_name}: {step_ok} ({note})")
 
         self.after(0, self.refresh_firewall_insight)
 
@@ -1581,7 +1680,7 @@ class NetScouterApp(ctk.CTk):
         try:
             result = get_firewall_status()
         except Exception as exc:  # noqa: BLE001
-            self.after(0, lambda: self._log(f"Firewall insight failed: {exc}"))
+            self.after(0, lambda: self._intel_log(f"Firewall insight failed: {exc}"))
             self.after(0, self._finish_firewall_refresh)
             return
 
@@ -1593,7 +1692,7 @@ class NetScouterApp(ctk.CTk):
         else:
             status_text = str(result.get("message") or result)
         self.after(0, lambda: self.firewall_status_var.set(status_text[:120]))
-        self.after(0, lambda: self._log(f"Firewall insight updated: {status_text}"))
+        self.after(0, lambda: self._intel_log(f"Firewall insight updated: {status_text}"))
         self.after(0, self._finish_firewall_refresh)
 
     def _finish_firewall_refresh(self) -> None:
@@ -1694,13 +1793,35 @@ class NetScouterApp(ctk.CTk):
 
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.console.insert("end", f"[{timestamp}] {message}\n")
-        self.console.see("end")
+        self.dashboard_console.insert("end", f"[{timestamp}] {message}\n")
+        self.dashboard_console.see("end")
         self.log_line_count += 1
 
         if self.log_line_count > MAX_LOG_LINES:
-            self.console.delete("1.0", "200.0")
+            self.dashboard_console.delete("1.0", "200.0")
             self.log_line_count -= 199
+
+    def _intel_log(self, message: str) -> None:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.intelligence_console.insert("end", f"[{timestamp}] {message}\n")
+        self.intelligence_console.see("end")
+        self.intel_log_line_count += 1
+        if self.intel_log_line_count > MAX_LOG_LINES:
+            self.intelligence_console.delete("1.0", "200.0")
+            self.intel_log_line_count -= 199
+
+    def _packet_log(self, message: str) -> None:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.packet_stream_console.insert("end", f"[{timestamp}] {message}\n")
+        self.packet_stream_console.see("end")
+        self.packet_log_line_count += 1
+        if self.packet_log_line_count > MAX_LOG_LINES:
+            self.packet_stream_console.delete("1.0", "200.0")
+            self.packet_log_line_count -= 199
+
+    def clear_intelligence_logs(self) -> None:
+        self.intelligence_console.delete("1.0", "end")
+        self.intel_log_line_count = 0
 
     def _ensure_matplotlib(self) -> tuple[bool, str]:
         if importlib.util.find_spec("matplotlib") is not None:
@@ -1720,6 +1841,8 @@ class NetScouterApp(ctk.CTk):
                     check=False,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                 )
             except Exception as exc:  # noqa: BLE001
                 return False, f"Failed to bootstrap pip: {exc}"
@@ -1734,6 +1857,8 @@ class NetScouterApp(ctk.CTk):
                 check=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 env={**os.environ, "PIP_DISABLE_PIP_VERSION_CHECK": "1"},
             )
         except Exception as exc:  # noqa: BLE001

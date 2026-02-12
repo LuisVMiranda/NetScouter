@@ -105,9 +105,16 @@ Defined in `pyproject.toml`:
 1. Choose a stream scope in Dashboard: **Selected Row**, **Target Host**, or **Local Network**.
 2. For row scope, select one or multiple rows in the table; right-click for quick actions.
 3. Click **Start Live Packet Stream**.
-4. Read updates in the packet detail panel, including direction (IN/OUT), source/destination, and PID when available.
+4. Read updates in the packet detail panel and in **Dashboard > Packet Stream** log tab (direction IN/OUT, source/destination, PID when available).
 5. Use **Export packet slice** for JSON evidence capture (host scope or full local-network scope).
-6. Use **Clear Scan Logs** to wipe both table rows and console logs when starting a fresh investigation.
+6. Use **Show/Hide Local Info** to refresh+toggle local IP visibility and **Clear Scan Logs** to wipe table rows/logs.
+
+### VirusTotal API key guidance
+
+- For this app, use a standard **VirusTotal API v3 key** from your VirusTotal account profile.
+- A personal/community key works for testing and light usage, but has tighter rate limits.
+- For heavier automation and higher throughput, use a paid/enterprise key.
+- Paste the key into the **Intelligence > VirusTotal key** field, then click **Apply Settings**.
 
 If the stream does not start, run with elevated privileges and ensure packet-capture drivers are present:
 - Windows: run shell as Administrator and install Npcap.

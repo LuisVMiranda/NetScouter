@@ -67,6 +67,14 @@ class PacketCaptureService:
         mode: str = "remote",
     ) -> None:
         """Start live capture for remote IP or local-network scope."""
+        global AsyncSniffer
+        if AsyncSniffer is None:
+            try:
+                from scapy.all import AsyncSniffer as runtime_sniffer  # type: ignore[import-not-found]
+
+                AsyncSniffer = runtime_sniffer
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError("Scapy is unavailable. Install scapy and rerun.") from exc
         if AsyncSniffer is None:
             raise RuntimeError("Scapy is unavailable. Install scapy and rerun.")
 
