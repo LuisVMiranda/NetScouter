@@ -31,6 +31,7 @@ from netscouter.export import (
 from netscouter.firewall.controller import banish_ip, get_firewall_status
 from netscouter.gui.icons import get_process_identity_label
 from netscouter.intel.geo import get_ip_intel
+from netscouter.intel.reputation import evaluate_reputation_consensus
 from netscouter.intel.packet_signals import evaluate_packet_signals
 from netscouter.scanner.engine import ScanJob, ScanResult, scan_established_connections, scan_targets
 from netscouter.scanner.packet_stream import PacketCaptureService
@@ -105,6 +106,16 @@ class NetScouterApp(ctk.CTk):
 
         self.status_filter_var = ctk.StringVar(value="All Status")
         self.risk_filter_var = ctk.StringVar(value="All Risk")
+        self.auto_block_consensus_var = ctk.BooleanVar(value=False)
+        self.reputation_threshold_var = ctk.StringVar(value="3")
+        self.reputation_timeout_var = ctk.StringVar(value="4")
+        self.abuseipdb_key_var = ctk.StringVar(value=os.getenv("ABUSEIPDB_API_KEY", ""))
+        self.virustotal_key_var = ctk.StringVar(
+            value=os.getenv("VIRUSTOTAL_API_KEY", "") or os.getenv("VT_API_KEY", "")
+        )
+        self.otx_key_var = ctk.StringVar(value=os.getenv("OTX_API_KEY", ""))
+        self.auto_blocked_ips: set[str] = set()
+        self.auto_block_guard = threading.Lock()
 
         self._configure_grid()
         self._build_controls()
@@ -220,6 +231,40 @@ class NetScouterApp(ctk.CTk):
             row=0, column=8, padx=4, pady=8, sticky="w"
         )
 
+        self.settings_row = ctk.CTkFrame(self.control_card, corner_radius=10)
+        self.settings_row.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 10))
+
+        ctk.CTkLabel(self.settings_row, text="Reputation API Keys").grid(row=0, column=0, padx=(8, 4), pady=8, sticky="w")
+        ctk.CTkEntry(self.settings_row, width=180, textvariable=self.abuseipdb_key_var, placeholder_text="ABUSEIPDB_API_KEY").grid(
+            row=0, column=1, padx=4, pady=8
+        )
+        ctk.CTkEntry(
+            self.settings_row,
+            width=180,
+            textvariable=self.virustotal_key_var,
+            placeholder_text="VIRUSTOTAL_API_KEY / VT_API_KEY",
+        ).grid(row=0, column=2, padx=4, pady=8)
+        ctk.CTkEntry(self.settings_row, width=160, textvariable=self.otx_key_var, placeholder_text="OTX_API_KEY").grid(
+            row=0, column=3, padx=4, pady=8
+        )
+
+        ctk.CTkLabel(self.settings_row, text="Threshold").grid(row=0, column=4, padx=(8, 4), pady=8)
+        ctk.CTkEntry(self.settings_row, width=55, textvariable=self.reputation_threshold_var).grid(row=0, column=5, padx=4, pady=8)
+        ctk.CTkLabel(self.settings_row, text="Timeout (s)").grid(row=0, column=6, padx=(8, 4), pady=8)
+        ctk.CTkEntry(self.settings_row, width=55, textvariable=self.reputation_timeout_var).grid(row=0, column=7, padx=4, pady=8)
+
+        ctk.CTkCheckBox(
+            self.settings_row,
+            text="Auto-block by consensus",
+            variable=self.auto_block_consensus_var,
+        ).grid(row=0, column=8, padx=8, pady=8)
+        ctk.CTkButton(
+            self.settings_row,
+            text="Apply Settings",
+            command=self.apply_settings,
+            width=120,
+        ).grid(row=0, column=9, padx=(4, 8), pady=8)
+
     def _build_results_table(self) -> None:
         self.table_card = ctk.CTkFrame(self, corner_radius=10)
         self.table_card.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
@@ -292,7 +337,18 @@ class NetScouterApp(ctk.CTk):
         self.filter_summary_var = ctk.StringVar(value="Showing 0 / 0 rows")
         ctk.CTkLabel(self.filter_row, textvariable=self.filter_summary_var).grid(row=0, column=8, padx=8, pady=8, sticky="e")
 
-        columns = ("port", "status", "remote_ip", "process", "exe_path", "location", "provider", "risk", "alerts")
+        columns = (
+            "port",
+            "status",
+            "remote_ip",
+            "process",
+            "exe_path",
+            "location",
+            "provider",
+            "consensus",
+            "risk",
+            "alerts",
+        )
         self.results_table = ttk.Treeview(self.table_card, columns=columns, show="headings", selectmode="browse")
 
         headings = {
@@ -303,6 +359,7 @@ class NetScouterApp(ctk.CTk):
             "exe_path": "Executable Path",
             "location": "Location",
             "provider": "Provider",
+            "consensus": "Consensus",
             "risk": "Risk",
             "alerts": "Alerts",
         }
@@ -314,6 +371,7 @@ class NetScouterApp(ctk.CTk):
             "exe_path": 300,
             "location": 160,
             "provider": 170,
+            "consensus": 110,
             "risk": 80,
             "alerts": 200,
         }
@@ -554,12 +612,43 @@ class NetScouterApp(ctk.CTk):
                 warnings.append("⚠️ Masquerading path")
         return warnings
 
+    def apply_settings(self) -> None:
+        os.environ["ABUSEIPDB_API_KEY"] = self.abuseipdb_key_var.get().strip()
+        os.environ["VIRUSTOTAL_API_KEY"] = self.virustotal_key_var.get().strip()
+        os.environ["OTX_API_KEY"] = self.otx_key_var.get().strip()
+        self._log("Settings applied (API keys, consensus threshold, timeout, auto-block preference)")
+
+    def _consensus_threshold(self) -> int:
+        try:
+            return max(1, int(self.reputation_threshold_var.get().strip()))
+        except ValueError:
+            return 3
+
+    def _reputation_timeout(self) -> float:
+        try:
+            return max(1.0, float(self.reputation_timeout_var.get().strip()))
+        except ValueError:
+            return 4.0
+
+    def _queue_auto_block_if_needed(self, remote_ip: str, should_block: bool, consensus_score: str) -> None:
+        if not self.auto_block_consensus_var.get() or not should_block:
+            return
+        with self.auto_block_guard:
+            if remote_ip in self.auto_blocked_ips:
+                return
+            self.auto_blocked_ips.add(remote_ip)
+        self.after(0, lambda: self._log(f"Auto-block triggered for {remote_ip} (consensus {consensus_score})"))
+        threading.Thread(target=self._banish_ip_worker, args=(remote_ip,), daemon=True, name="auto-banish-ip").start()
+
     def _enrich_and_queue(self, scan_result: ScanResult, scan_id: int) -> None:
         location = "Unknown"
         provider = "Unknown"
         risk_level = "average"
         country = ""
         city = ""
+        consensus_score = "0/0"
+        consensus_summary = "n/a"
+        should_block = False
 
         try:
             intel = get_ip_intel(scan_result.host)
@@ -580,6 +669,32 @@ class NetScouterApp(ctk.CTk):
         if warnings and risk_level != "high":
             risk_level = "high"
 
+        try:
+            reputation = evaluate_reputation_consensus(
+                scan_result.host,
+                threshold=self._consensus_threshold(),
+                timeout_seconds=self._reputation_timeout(),
+                api_keys={
+                    "abuseipdb": self.abuseipdb_key_var.get().strip(),
+                    "virustotal": self.virustotal_key_var.get().strip(),
+                    "otx": self.otx_key_var.get().strip(),
+                },
+            )
+            consensus_score = str(reputation.get("consensus_score", "0/0"))
+            consensus_summary = str(reputation.get("disposition", "allow"))
+            should_block = bool(reputation.get("should_block", False))
+            provider_bits = [
+                f"{name}:{details.get('reason', '')}"
+                for name, details in dict(reputation.get("providers", {})).items()
+            ]
+            warnings.extend([f"Intel {consensus_summary.upper()} {consensus_score}"])
+            if provider_bits:
+                warnings.append(" | ".join(provider_bits[:2]))
+            if should_block:
+                risk_level = "high"
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Reputation lookup failed: {exc}")
+
         payload = {
             "scan_id": scan_id,
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -590,6 +705,7 @@ class NetScouterApp(ctk.CTk):
             "city": city,
             "location": location,
             "provider": provider,
+            "consensus": consensus_score,
             "risk_level": risk_level,
             "risk": risk_level.capitalize(),
             "pid": pid,
@@ -601,6 +717,7 @@ class NetScouterApp(ctk.CTk):
             "alerts": " ".join(warnings) if warnings else "—",
         }
         self.ui_queue.put(payload)
+        self._queue_auto_block_if_needed(scan_result.host, should_block, consensus_score)
 
     def _passes_filters(self, row: dict[str, str | int | list[str]]) -> bool:
         selected_status = self.status_filter_var.get()
@@ -631,6 +748,7 @@ class NetScouterApp(ctk.CTk):
                     payload["exe_path"],
                     payload["location"],
                     payload["provider"],
+                    payload["consensus"],
                     payload["risk"],
                     payload["alerts"],
                 ),
@@ -786,6 +904,7 @@ class NetScouterApp(ctk.CTk):
                         payload["exe_path"],
                         payload["location"],
                         payload["provider"],
+                        payload["consensus"],
                         payload["risk"],
                         payload["alerts"],
                     ),
@@ -868,6 +987,8 @@ class NetScouterApp(ctk.CTk):
         try:
             result = banish_ip(ip)
         except Exception as exc:  # noqa: BLE001
+            with self.auto_block_guard:
+                self.auto_blocked_ips.discard(ip)
             self.after(0, lambda: self._log(f"Banish command failed: {exc}"))
             return
 

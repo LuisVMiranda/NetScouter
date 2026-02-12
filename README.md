@@ -81,3 +81,17 @@ NetScouter can stream packets live with Scapy. Raw packet sniffing generally req
 - **Windows:** run the app from an Administrator shell (Npcap/WinPcap recommended for capture support).
 
 Without elevated permissions, packet stream start may fail with permission errors.
+
+## Reputation intelligence configuration
+
+NetScouter can enrich each scanned IP using AbuseIPDB, VirusTotal, and AlienVault OTX. Configure API keys with environment variables (or in-app settings panel and click **Apply Settings**):
+
+- `ABUSEIPDB_API_KEY`
+- `VIRUSTOTAL_API_KEY` (or `VT_API_KEY`)
+- `OTX_API_KEY`
+
+Consensus scoring is displayed per row as `flagged/3`. Auto-blocking only runs when:
+
+1. **Auto-block by consensus** is enabled in settings.
+2. The configured threshold is met (default `3`).
+3. Firewall action executes successfully.
