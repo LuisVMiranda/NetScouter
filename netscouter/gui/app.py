@@ -304,11 +304,12 @@ class NetScouterApp(ctk.CTk):
 
         self.scan_button = ctk.CTkButton(self.scan_row, text="Scan", corner_radius=10, command=self.start_scan, width=110)
         self.scan_button.grid(row=1, column=0, padx=6, pady=8)
-        self.scan_established_button = ctk.CTkButton(self.scan_row, text="Scan ESTABLISHED", corner_radius=10, command=self.start_established_scan, width=150)
+        self.scan_established_button = ctk.CTkButton(self.scan_row, text="Scan Established", corner_radius=10, command=self.start_established_scan, width=150)
         self.scan_established_button.grid(row=1, column=1, padx=6, pady=8, sticky="w")
-        ctk.CTkButton(self.scan_row, text="Show Charts", corner_radius=10, command=self.show_charts, width=110).grid(row=1, column=2, padx=6, pady=8)
-        self.local_info_button = ctk.CTkButton(self.scan_row, text="Show Local Info", corner_radius=10, command=self.toggle_local_network_info, width=140)
-        self.local_info_button.grid(row=1, column=3, padx=6, pady=8)
+        ctk.CTkButton(self.scan_row, text="Stop All", corner_radius=10, width=110, command=self.stop_all_tasks).grid(row=1, column=2, padx=6, pady=8)
+        ctk.CTkButton(self.scan_row, text="Show Charts", corner_radius=10, command=self.show_charts, width=110).grid(row=1, column=3, padx=6, pady=8)
+        self.local_info_button = ctk.CTkButton(self.scan_row, text="Show/Hide Local Info", corner_radius=10, command=self.toggle_local_network_info, width=160)
+        self.local_info_button.grid(row=1, column=4, padx=6, pady=8)
 
         ctk.CTkLabel(
             self.scan_row,
@@ -414,6 +415,7 @@ class NetScouterApp(ctk.CTk):
         self.lan_table.configure(yscrollcommand=y_scroll.set)
         self.lan_table.grid(row=2, column=0, sticky="nsew", padx=(8, 0), pady=(0, 8))
         y_scroll.grid(row=2, column=1, sticky="ns", padx=(0, 8), pady=(0, 8))
+        self.lan_table.bind("<Button-3>", self._open_lan_context_menu)
 
         ops_actions = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         ops_actions.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
@@ -440,10 +442,8 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkButton(self.filter_row, text="Clear Filters", corner_radius=10, width=120, command=self.clear_filters).grid(row=0, column=4, padx=6, pady=8)
         ctk.CTkOptionMenu(self.filter_row, values=["Selected Row", "Target Host", "Local Network"], variable=self.packet_stream_mode_var, width=140, command=self._on_packet_scope_changed).grid(row=0, column=6, padx=6, pady=8)
         ctk.CTkButton(self.filter_row, text="Start Live Packet Stream", corner_radius=10, width=180, command=self.start_live_packet_stream).grid(row=0, column=7, padx=6, pady=8)
-        ctk.CTkButton(self.filter_row, text="STOP ALL", corner_radius=10, width=90, command=self.stop_all_tasks).grid(row=0, column=8, padx=6, pady=8)
         ctk.CTkButton(self.filter_row, text="Export packet slice", corner_radius=10, width=150, command=self.export_packet_slice).grid(row=0, column=9, padx=6, pady=8)
         ctk.CTkButton(self.filter_row, text="Clear Scan Logs", corner_radius=10, width=130, command=self.clear_scan_logs).grid(row=1, column=0, padx=6, pady=(0, 8), sticky="w")
-        ctk.CTkButton(self.filter_row, text="Show/Hide Local Info", corner_radius=10, width=160, command=self.toggle_local_network_info).grid(row=1, column=1, padx=6, pady=(0, 8), sticky="w")
         ctk.CTkButton(self.filter_row, text="◀", width=38, command=self._prev_table_page).grid(row=0, column=10, padx=(6, 2), pady=8)
         ctk.CTkButton(self.filter_row, text="▶", width=38, command=self._next_table_page).grid(row=0, column=11, padx=(2, 6), pady=8)
 
@@ -474,16 +474,8 @@ class NetScouterApp(ctk.CTk):
         self.results_table.bind("<Motion>", self._on_table_hover)
         self.results_table.bind("<Leave>", lambda _e: self._hide_table_tooltip())
 
-        self.packet_detail_card = self._register_card(ctk.CTkFrame(self.table_card, corner_radius=10))
-        self.packet_detail_card.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
-        self.packet_detail_card.grid_columnconfigure(0, weight=1)
-        self.packet_detail_header_var = ctk.StringVar(value="Packet detail panel: select a row to inspect traffic")
-        ctk.CTkLabel(self.packet_detail_card, textvariable=self.packet_detail_header_var, anchor="w").grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
-        self.packet_detail_box = ctk.CTkTextbox(self.packet_detail_card, corner_radius=10, height=140)
-        self.packet_detail_box.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
-
         self.dashboard_console_card = self._register_card(ctk.CTkFrame(self.table_card, corner_radius=10))
-        self.dashboard_console_card.grid(row=4, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
+        self.dashboard_console_card.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
         self.dashboard_console_card.grid_columnconfigure(0, weight=1)
         self.dashboard_console_tabs = ctk.CTkTabview(self.dashboard_console_card, corner_radius=10, height=180)
         self.dashboard_console_tabs.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
@@ -969,8 +961,6 @@ class NetScouterApp(ctk.CTk):
         self.filtered_rows.clear()
         self._table_item_lookup.clear()
         self.results_table.selection_remove(*self.results_table.selection())
-        self.packet_detail_box.delete("1.0", "end")
-        self.packet_detail_header_var.set("Packet detail panel: select a row to inspect traffic")
         self._render_token += 1
         self._render_table_page(self._render_token)
         self._log("Scan logs and table rows cleared")
@@ -1107,11 +1097,9 @@ class NetScouterApp(ctk.CTk):
         if self.local_info_visible:
             self.local_info_visible = False
             self.local_info_var.set("Local network info hidden")
-            self.local_info_button.configure(text="Show Local Info")
             return
         self.local_info_visible = True
         self.show_local_network_info()
-        self.local_info_button.configure(text="Hide Local Info")
 
     def stop_all_tasks(self) -> None:
         stopped: list[str] = []
@@ -1145,6 +1133,18 @@ class NetScouterApp(ctk.CTk):
             self.after(0, lambda: self.lan_status_var.set(f"LAN discovery failed: {exc}"))
             return
 
+        local_ipv4, _ = self._detect_local_ip()
+        if local_ipv4 != "n/a" and all(str(dev.get("ip", "")) != local_ipv4 for dev in devices):
+            devices.append(
+                {
+                    "ip": local_ipv4,
+                    "mac": "",
+                    "hostname": socket.gethostname() or "This Device",
+                    "vendor": "Local Host",
+                    "device_type": "computer",
+                }
+            )
+
         now = datetime.now()
         for dev in devices:
             self.device_registry.upsert(
@@ -1163,19 +1163,69 @@ class NetScouterApp(ctk.CTk):
     def _render_lan_table(self) -> None:
         for item in self.lan_table.get_children():
             self.lan_table.delete(item)
+        local_ipv4 = self.local_ipv4
         for dev in self.discovered_devices:
+            ip = str(dev.get("ip", ""))
+            hostname = str(dev.get("hostname", "Unknown"))
+            vendor = str(dev.get("vendor", "Unknown"))
+            if local_ipv4 != "n/a" and ip == local_ipv4:
+                hostname = f"{hostname} (This Device)"
+                vendor = f"{vendor} / Local Host"
             self.lan_table.insert(
                 "",
                 "end",
                 values=(
-                    str(dev.get("ip", "")),
-                    str(dev.get("hostname", "Unknown")),
-                    str(dev.get("vendor", "Unknown")),
+                    ip,
+                    hostname,
+                    vendor,
                     str(dev.get("device_type", "unknown")),
                     str(dev.get("mac", "")),
                 ),
             )
         self.lan_status_var.set(f"Discovered {len(self.discovered_devices)} devices | IoT anomalies {len(self.lan_anomalies)}")
+
+    def _open_lan_context_menu(self, event: object) -> None:
+        if not hasattr(event, "x") or not hasattr(event, "y"):
+            return
+        item = self.lan_table.identify_row(event.y)
+        if item:
+            self.lan_table.selection_set(item)
+        menu = Menu(self, tearoff=0)
+        menu.add_command(label="Track packets for selected device", command=self.track_selected_lan_device_packets)
+        menu.add_command(label="Packet breakdown (last 40)", command=self.show_selected_lan_packet_breakdown)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def track_selected_lan_device_packets(self) -> None:
+        ip = self._selected_lan_ip()
+        if not ip:
+            self._log("Select a LAN device row first")
+            return
+        self.target_var.set(ip)
+        self.selected_remote_ip = ip
+        self.selected_port = None
+        self.packet_stream_mode_var.set("Target Host")
+        self._on_packet_scope_changed()
+        self._show_workspace_tab("Dashboard")
+        self._packet_log(f"Tracking packets for LAN device {ip}. Starting stream in Target Host mode.")
+        self.start_live_packet_stream()
+
+    def show_selected_lan_packet_breakdown(self) -> None:
+        ip = self._selected_lan_ip()
+        if not ip:
+            self._log("Select a LAN device row first")
+            return
+        packets = self.packet_service.get_packets(remote_ip=ip, limit=40)
+        if not packets:
+            messagebox.showinfo("Packet breakdown", f"No captured packets yet for {ip}.")
+            return
+        lines = []
+        for pkt in packets[-40:]:
+            lines.append(
+                f"{pkt.get('timestamp')} | {pkt.get('proto')} | "
+                f"{pkt.get('src')}:{pkt.get('raw', {}).get('src_port')} -> {pkt.get('dst')}:{pkt.get('raw', {}).get('dst_port')} | "
+                f"pid={pkt.get('pid')} proc={pkt.get('process_name')}"
+            )
+        messagebox.showinfo(f"Packet breakdown: {ip}", "\n".join(lines))
 
     def show_lan_anomalies(self) -> None:
         if not self.lan_anomalies:
@@ -1266,7 +1316,6 @@ class NetScouterApp(ctk.CTk):
 
         self.selected_remote_ip = selected_ip
         self.selected_port = selected_port
-        self.packet_detail_header_var.set(f"Packet detail panel for {selected_ip}")
         self._render_packet_slice(selected_ip)
 
     def _open_table_context_menu(self, event: object) -> None:
@@ -1337,6 +1386,8 @@ class NetScouterApp(ctk.CTk):
             return False, err or "Failed to install scapy"
         if importlib.util.find_spec("scapy") is None:
             return False, "pip install reported success but scapy import was not found"
+        if os_name == "windows":
+            self._packet_log("Scapy installed. If capture still yields no packets, install/repair Npcap with WinPcap compatibility mode.")
         return True, "Scapy installed"
 
     def start_live_packet_stream(self) -> None:
@@ -1349,6 +1400,10 @@ class NetScouterApp(ctk.CTk):
         if mode == "Target Host":
             target_ip = self.target_var.get().strip()
             capture_port = None
+            self.local_ipv4, self.local_ipv6 = self._detect_local_ip()
+            if target_ip and target_ip == self.local_ipv4:
+                network_cidr = derive_lan_cidr(self.local_ipv4)
+                mode = "Local Network"
         elif mode == "Local Network":
             self.local_ipv4, self.local_ipv6 = self._detect_local_ip()
             network_cidr = derive_lan_cidr(self.local_ipv4)
@@ -1407,11 +1462,22 @@ class NetScouterApp(ctk.CTk):
         stream_target = network_cidr if mode == "Local Network" else (f"{target_ip}:{capture_port}" if capture_port else target_ip)
         self.packet_stream_status_var.set(f"Streaming {stream_target}")
         panel_scope = "local network" if mode == "Local Network" else target_ip
-        self.packet_detail_header_var.set(f"Packet detail panel for {panel_scope}")
         self._packet_log(
             f"Live packet stream started for {stream_target}. Logs appear below with IN/OUT direction, endpoint, and PID when available."
         )
         self.after(350, self._poll_packet_stream)
+        self.after(4000, self._check_packet_flow)
+
+    def _check_packet_flow(self) -> None:
+        if not self.packet_service.is_running:
+            return
+        samples = self.packet_service.get_packets(limit=20)
+        if samples:
+            return
+        self._packet_log(
+            "No packets seen yet. Verify: (1) elevated privileges, (2) packet capture driver/backend, "
+            "(3) choose Local Network mode if monitoring host-wide traffic."
+        )
 
     def stop_live_packet_stream(self) -> None:
         stopped = self.packet_service.stop()
@@ -1446,10 +1512,7 @@ class NetScouterApp(ctk.CTk):
     def _render_packet_slice(self, remote_ip: str) -> None:
         packet_filter = None if self.packet_service.mode == "local_network" else remote_ip
         packets = self.packet_service.get_packets(remote_ip=packet_filter, limit=PACKET_SLICE_LIMIT)
-        self.packet_detail_box.delete("1.0", "end")
-
         if not packets:
-            self.packet_detail_box.insert("1.0", "No packets captured yet for this host.")
             self.packet_stream_console.delete("1.0", "end")
             self.packet_stream_console.insert("1.0", "No packets captured yet for this host.")
             return
@@ -1467,7 +1530,6 @@ class NetScouterApp(ctk.CTk):
                 f"len={packet.get('packet_length')} flags={packet.get('tcp_flags')} "
                 f"pid={pid} proc={proc} malformed={packet.get('malformed')} error={packet.get('parse_error')}"
             )
-        self.packet_detail_box.insert("1.0", "\n".join(lines))
         self.packet_stream_console.delete("1.0", "end")
         self.packet_stream_console.insert("1.0", "\n".join(lines))
 
