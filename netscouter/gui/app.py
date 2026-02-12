@@ -124,6 +124,7 @@ class NetScouterApp(ctk.CTk):
 
         self.target_var = ctk.StringVar(value="127.0.0.1")
         self.port_range_var = ctk.StringVar(value="20-1024")
+        self.local_info_var = ctk.StringVar(value="Local network context not loaded")
         self.schedule_hours_var = ctk.StringVar(value="6")
         self.firewall_status_var = ctk.StringVar(value="Not queried")
         self.firewall_rule_name_var = ctk.StringVar(value="NetScouter Custom Rule")
@@ -157,11 +158,21 @@ class NetScouterApp(ctk.CTk):
         self._table_item_lookup: dict[str, dict[str, str | int | list[str]]] = {}
         self.ai_cancel_event = threading.Event()
         self.ai_job_thread: threading.Thread | None = None
+        self.ai_elapsed_var = ctk.StringVar(value="Elapsed: 00:00")
+        self.ai_started_at: float | None = None
+        self.ai_timer_token = 0
+        self.ai_max_rows_var = ctk.StringVar(value="600")
+        self.ai_high_risk_only_var = ctk.BooleanVar(value=True)
+        self.ai_open_ports_only_var = ctk.BooleanVar(value=False)
+        self.ai_alerts_only_var = ctk.BooleanVar(value=False)
+        self.theme_cards: list[ctk.CTkFrame] = []
+        self.firewall_refresh_in_progress = False
+        self._last_firewall_status_fetch = 0.0
+        self._table_tooltip: ctk.CTkToplevel | None = None
+        self._table_tooltip_label: ctk.CTkLabel | None = None
 
         self._configure_grid()
-        self._build_controls()
-        self._build_results_table()
-        self._build_console()
+        self._build_layout()
         self._apply_theme()
 
         self._start_honeypot()
@@ -184,390 +195,263 @@ class NetScouterApp(ctk.CTk):
 
     def _configure_grid(self) -> None:
         self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=0)
         self.grid_rowconfigure(1, weight=1)
-        self.grid_rowconfigure(2, weight=1)
 
-    def _build_controls(self) -> None:
-        self.control_card = ctk.CTkFrame(self, corner_radius=10)
-        self.control_card.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
-        self.control_card.grid_columnconfigure(0, weight=1)
+    def _register_card(self, frame: ctk.CTkFrame) -> ctk.CTkFrame:
+        self.theme_cards.append(frame)
+        return frame
 
-        self.scan_row = ctk.CTkFrame(self.control_card, corner_radius=10)
-        self.scan_row.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
-        self.scan_row.grid_columnconfigure(1, weight=1)
+    def _build_layout(self) -> None:
+        self.topbar = self._register_card(ctk.CTkFrame(self, corner_radius=10))
+        self.topbar.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+        self.topbar.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(self.scan_row, text="Target").grid(row=0, column=0, padx=6, pady=8, sticky="w")
-        ctk.CTkEntry(self.scan_row, textvariable=self.target_var).grid(row=0, column=1, padx=6, pady=8, sticky="ew")
+        left_bar = self._register_card(ctk.CTkFrame(self.topbar, corner_radius=10))
+        left_bar.grid(row=0, column=0, sticky="w", padx=8, pady=8)
+        ctk.CTkLabel(left_bar, text="NetScouter", font=ctk.CTkFont(size=20, weight="bold")).grid(row=0, column=0, padx=(8, 14), pady=8)
 
-        ctk.CTkLabel(self.scan_row, text="Port Range").grid(row=0, column=2, padx=6, pady=8, sticky="w")
-        ctk.CTkEntry(self.scan_row, width=120, textvariable=self.port_range_var).grid(row=0, column=3, padx=6, pady=8)
+        self.tab_buttons: dict[str, ctk.CTkButton] = {}
+        self.workspace_panes: dict[str, ctk.CTkFrame] = {}
+        tabs = ["Dashboard", "Intelligence", "Firewall", "AI Auditor", "Ops/Schedule"]
+        for index, name in enumerate(tabs, start=1):
+            button = ctk.CTkButton(
+                left_bar,
+                text=name,
+                height=34,
+                width=132,
+                command=lambda tab_name=name: self._show_workspace_tab(tab_name),
+            )
+            button.grid(row=0, column=index, padx=4, pady=8)
+            self.tab_buttons[name] = button
 
-        self.scan_button = ctk.CTkButton(
-            self.scan_row,
-            text="Scan",
-            corner_radius=10,
-            command=self.start_scan,
-            width=110,
-        )
-        self.scan_button.grid(row=0, column=4, padx=6, pady=8)
-
-        self.scan_established_button = ctk.CTkButton(
-            self.scan_row,
-            text="Scan ESTABLISHED",
-            corner_radius=10,
-            command=self.start_established_scan,
-            width=150,
-        )
-        self.scan_established_button.grid(row=0, column=5, padx=6, pady=8)
-
-        ctk.CTkButton(
-            self.scan_row,
-            text="Show Charts",
-            corner_radius=10,
-            command=self.show_charts,
-            width=110,
-        ).grid(row=0, column=6, padx=6, pady=8)
-
-        self.ops_row = ctk.CTkFrame(self.control_card, corner_radius=10)
-        self.ops_row.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
-
-        ctk.CTkLabel(self.ops_row, text="Every (hours)").grid(row=0, column=0, padx=6, pady=8)
-        ctk.CTkEntry(self.ops_row, width=70, textvariable=self.schedule_hours_var).grid(row=0, column=1, padx=6, pady=8)
-
-        ctk.CTkButton(
-            self.ops_row,
-            text="Start Recurring",
-            corner_radius=10,
-            command=self.start_recurring_scan,
-            width=130,
-        ).grid(row=0, column=2, padx=6, pady=8)
-
-        ctk.CTkButton(
-            self.ops_row,
-            text="Stop Recurring",
-            corner_radius=10,
-            command=self.stop_recurring_scan,
-            width=120,
-        ).grid(row=0, column=5, padx=6, pady=8)
-
-        ctk.CTkButton(
-            self.ops_row,
-            text="Refresh Firewall",
-            corner_radius=10,
-            command=self.refresh_firewall_insight,
-            width=140,
-        ).grid(row=0, column=4, padx=6, pady=8)
-
-        ctk.CTkButton(
-            self.ops_row,
-            text="Banish Selected IP",
-            corner_radius=10,
-            command=self.banish_selected_ip,
-            width=155,
-        ).grid(row=0, column=5, padx=6, pady=8)
-
-        ctk.CTkButton(
-            self.ops_row,
-            text="Quarantine Selected IP",
-            corner_radius=10,
-            command=self.quarantine_selected_ip,
-            width=175,
-        ).grid(row=0, column=6, padx=6, pady=8)
-
+        right_bar = self._register_card(ctk.CTkFrame(self.topbar, corner_radius=10))
+        right_bar.grid(row=0, column=1, sticky="e", padx=8, pady=8)
+        ctk.CTkLabel(right_bar, text="Appearance").grid(row=0, column=0, padx=(8, 4), pady=8)
         self.theme_switch = ctk.CTkSegmentedButton(
-            self.ops_row,
-            values=["🌙", "☀️"],
+            right_bar,
+            values=["Dark", "Light"],
             command=self._switch_theme,
             corner_radius=10,
-            width=170,
+            width=160,
         )
-        self.theme_switch.set("🌙")
-        self.theme_switch.grid(row=0, column=7, padx=(10, 6), pady=8)
+        self.theme_switch.set("Dark")
+        self.theme_switch.grid(row=0, column=1, padx=(4, 8), pady=8)
 
-        ctk.CTkLabel(self.ops_row, text="Firewall:").grid(row=0, column=8, padx=(10, 4), pady=8)
-        ctk.CTkLabel(self.ops_row, textvariable=self.firewall_status_var, width=340, anchor="w").grid(
-            row=0, column=9, padx=4, pady=8, sticky="w"
-        )
+        self.workspace = self._register_card(ctk.CTkFrame(self, corner_radius=10))
+        self.workspace.grid(row=1, column=0, sticky="nsew", padx=16, pady=(8, 16))
+        self.workspace.grid_columnconfigure(0, weight=1)
+        self.workspace.grid_rowconfigure(0, weight=1)
 
-        self.settings_row = ctk.CTkFrame(self.control_card, corner_radius=10)
-        self.settings_row.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 10))
+        self._build_dashboard_tab(self._create_workspace_pane("Dashboard"))
+        self._build_intelligence_tab(self._create_workspace_pane("Intelligence"))
+        self._build_firewall_tab(self._create_workspace_pane("Firewall"))
+        self._build_ai_auditor_tab(self._create_workspace_pane("AI Auditor"))
+        self._build_ops_schedule_tab(self._create_workspace_pane("Ops/Schedule"))
+        self._show_workspace_tab("Dashboard")
 
-        ctk.CTkLabel(self.settings_row, text="Reputation API Keys").grid(row=0, column=0, padx=(8, 4), pady=8, sticky="w")
-        ctk.CTkEntry(self.settings_row, width=180, textvariable=self.abuseipdb_key_var, placeholder_text="ABUSEIPDB_API_KEY").grid(
-            row=0, column=1, padx=4, pady=8
-        )
-        ctk.CTkEntry(
-            self.settings_row,
-            width=180,
-            textvariable=self.virustotal_key_var,
-            placeholder_text="VIRUSTOTAL_API_KEY / VT_API_KEY",
-        ).grid(row=0, column=2, padx=4, pady=8)
-        ctk.CTkEntry(self.settings_row, width=160, textvariable=self.otx_key_var, placeholder_text="OTX_API_KEY").grid(
-            row=0, column=3, padx=4, pady=8
-        )
+    def _create_workspace_pane(self, name: str) -> ctk.CTkFrame:
+        pane = self._register_card(ctk.CTkFrame(self.workspace, corner_radius=10))
+        pane.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        self.workspace_panes[name] = pane
+        return pane
 
-        ctk.CTkLabel(self.settings_row, text="Threshold").grid(row=0, column=4, padx=(8, 4), pady=8)
-        ctk.CTkEntry(self.settings_row, width=55, textvariable=self.reputation_threshold_var).grid(row=0, column=5, padx=4, pady=8)
-        ctk.CTkLabel(self.settings_row, text="Timeout (s)").grid(row=0, column=6, padx=(8, 4), pady=8)
-        ctk.CTkEntry(self.settings_row, width=55, textvariable=self.reputation_timeout_var).grid(row=0, column=7, padx=4, pady=8)
-        ctk.CTkLabel(self.settings_row, text="AI Timeout (s)").grid(row=0, column=8, padx=(8, 4), pady=8)
-        ctk.CTkEntry(self.settings_row, width=65, textvariable=self.ai_timeout_var).grid(row=0, column=9, padx=4, pady=8)
+    def _show_workspace_tab(self, name: str) -> None:
+        self.workspace_panes[name].tkraise()
+        for tab_name, button in self.tab_buttons.items():
+            button.configure(fg_color=("#1E3A8A" if tab_name == name else "#374151"))
 
-        ctk.CTkCheckBox(
-            self.settings_row,
-            text="Auto-block by consensus",
-            variable=self.auto_block_consensus_var,
-        ).grid(row=0, column=10, padx=8, pady=8)
-        ctk.CTkButton(
-            self.settings_row,
-            text="Apply Settings",
-            command=self.apply_settings,
-            width=120,
-        ).grid(row=0, column=11, padx=(4, 8), pady=8)
+    def _build_dashboard_tab(self, pane: ctk.CTkFrame) -> None:
+        pane.grid_columnconfigure(0, weight=1)
+        pane.grid_rowconfigure(2, weight=1)
 
-    def _build_results_table(self) -> None:
-        self.table_card = ctk.CTkFrame(self, corner_radius=10)
-        self.table_card.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
+        self.scan_row = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        self.scan_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
+        self.scan_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(self.scan_row, text="Target").grid(row=0, column=0, padx=6, pady=8, sticky="w")
+        ctk.CTkEntry(self.scan_row, textvariable=self.target_var, placeholder_text="127.0.0.1 or hostname").grid(row=0, column=1, padx=6, pady=8, sticky="ew")
+        ctk.CTkLabel(self.scan_row, text="Port Range").grid(row=0, column=2, padx=6, pady=8, sticky="w")
+        ctk.CTkEntry(self.scan_row, width=140, textvariable=self.port_range_var, placeholder_text="20-1024").grid(row=0, column=3, padx=6, pady=8)
+        self.scan_button = ctk.CTkButton(self.scan_row, text="Scan", corner_radius=10, command=self.start_scan, width=110)
+        self.scan_button.grid(row=0, column=4, padx=6, pady=8)
+        self.scan_established_button = ctk.CTkButton(self.scan_row, text="Scan ESTABLISHED", corner_radius=10, command=self.start_established_scan, width=150)
+        self.scan_established_button.grid(row=0, column=5, padx=6, pady=8)
+        ctk.CTkButton(self.scan_row, text="Show Charts", corner_radius=10, command=self.show_charts, width=110).grid(row=0, column=6, padx=6, pady=8)
+        ctk.CTkButton(self.scan_row, text="Local Info", corner_radius=10, command=self.show_local_network_info, width=110).grid(row=0, column=7, padx=6, pady=8)
+        ctk.CTkLabel(self.scan_row, textvariable=self.local_info_var, anchor="w", width=320).grid(row=0, column=8, padx=6, pady=8, sticky="w")
+
+        self._build_results_table(pane, row=2)
+
+    def _build_intelligence_tab(self, pane: ctk.CTkFrame) -> None:
+        pane.grid_columnconfigure(0, weight=1)
+        pane.grid_rowconfigure(4, weight=1)
+
+        guide = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        guide.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
+        ctk.CTkLabel(
+            guide,
+            text=(
+                "Configure threat-intel providers. Keys are optional but improve reputation consensus accuracy. "
+                "Typical key format is long alphanumeric API tokens."
+            ),
+            anchor="w",
+            justify="left",
+            wraplength=1100,
+        ).grid(row=0, column=0, padx=10, pady=8, sticky="w")
+
+        self.settings_row = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        self.settings_row.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
+        ctk.CTkLabel(self.settings_row, text="AbuseIPDB key").grid(row=0, column=0, padx=(8, 4), pady=8, sticky="w")
+        ctk.CTkEntry(self.settings_row, width=260, textvariable=self.abuseipdb_key_var, placeholder_text="e.g. 1f2a...abuseipdb-token").grid(row=0, column=1, padx=4, pady=8)
+        ctk.CTkLabel(self.settings_row, text="VirusTotal key").grid(row=0, column=2, padx=(8, 4), pady=8, sticky="w")
+        ctk.CTkEntry(self.settings_row, width=260, textvariable=self.virustotal_key_var, placeholder_text="e.g. 5ab3...virustotal-api-key").grid(row=0, column=3, padx=4, pady=8)
+        ctk.CTkLabel(self.settings_row, text="AlienVault OTX key").grid(row=1, column=0, padx=(8, 4), pady=8, sticky="w")
+        ctk.CTkEntry(self.settings_row, width=260, textvariable=self.otx_key_var, placeholder_text="e.g. 7cd9...otx-token").grid(row=1, column=1, padx=4, pady=8)
+        ctk.CTkLabel(self.settings_row, text="Consensus Threshold").grid(row=1, column=2, padx=(8, 4), pady=8)
+        ctk.CTkEntry(self.settings_row, width=70, textvariable=self.reputation_threshold_var, placeholder_text="3").grid(row=1, column=3, padx=4, pady=8, sticky="w")
+        ctk.CTkLabel(self.settings_row, text="Intel timeout (s)").grid(row=0, column=4, padx=(8, 4), pady=8)
+        ctk.CTkEntry(self.settings_row, width=80, textvariable=self.reputation_timeout_var, placeholder_text="4").grid(row=0, column=5, padx=4, pady=8)
+        ctk.CTkLabel(self.settings_row, text="AI timeout (s)").grid(row=1, column=4, padx=(8, 4), pady=8)
+        ctk.CTkEntry(self.settings_row, width=80, textvariable=self.ai_timeout_var, placeholder_text="120").grid(row=1, column=5, padx=4, pady=8)
+        ctk.CTkCheckBox(self.settings_row, text="Auto-block by consensus", variable=self.auto_block_consensus_var).grid(row=0, column=6, rowspan=2, padx=10, pady=8)
+        ctk.CTkButton(self.settings_row, text="Apply Settings", command=self.apply_settings, width=130).grid(row=0, column=7, rowspan=2, padx=(4, 10), pady=8)
+
+        firewall_frame = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        firewall_frame.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
+        ctk.CTkLabel(firewall_frame, text="Firewall Operations", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+        self._build_firewall_controls(firewall_frame, start_row=1)
+
+        self._build_console(pane, row=3, compact=True)
+
+    def _build_ops_schedule_tab(self, pane: ctk.CTkFrame) -> None:
+        pane.grid_columnconfigure(0, weight=1)
+
+        self.ops_row = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        self.ops_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
+        ctk.CTkLabel(self.ops_row, text="Every (hours)").grid(row=0, column=0, padx=6, pady=8)
+        ctk.CTkEntry(self.ops_row, width=70, textvariable=self.schedule_hours_var).grid(row=0, column=1, padx=6, pady=8)
+        ctk.CTkButton(self.ops_row, text="Start Recurring", corner_radius=10, command=self.start_recurring_scan, width=130).grid(row=0, column=2, padx=6, pady=8)
+        ctk.CTkButton(self.ops_row, text="Stop Recurring", corner_radius=10, command=self.stop_recurring_scan, width=120).grid(row=0, column=3, padx=6, pady=8)
+        self.ops_refresh_firewall_button = ctk.CTkButton(self.ops_row, text="Refresh Firewall", corner_radius=10, command=self.refresh_firewall_insight, width=140)
+        self.ops_refresh_firewall_button.grid(row=0, column=4, padx=6, pady=8)
+        ctk.CTkLabel(self.ops_row, text="Firewall:").grid(row=0, column=5, padx=(10, 4), pady=8)
+        ctk.CTkLabel(self.ops_row, textvariable=self.firewall_status_var, width=340, anchor="w").grid(row=0, column=6, padx=4, pady=8, sticky="w")
+
+        ops_actions = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        ops_actions.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
+        ctk.CTkButton(ops_actions, text="Banish Selected IP", corner_radius=10, command=self.banish_selected_ip, width=160).grid(row=0, column=0, padx=8, pady=10)
+        ctk.CTkButton(ops_actions, text="Quarantine Selected IP", corner_radius=10, command=self.quarantine_selected_ip, width=180).grid(row=0, column=1, padx=8, pady=10)
+        ctk.CTkButton(ops_actions, text="Export AI Audit", corner_radius=10, command=self.export_ai_audit, width=140).grid(row=0, column=2, padx=8, pady=10)
+        ctk.CTkButton(ops_actions, text="Export XLSX", corner_radius=10, command=self.export_xlsx, width=120).grid(row=0, column=3, padx=8, pady=10)
+
+    def _build_results_table(self, parent: ctk.CTkFrame, row: int) -> None:
+        self.table_card = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
+        self.table_card.grid(row=row, column=0, sticky="nsew", padx=8, pady=(0, 8))
         self.table_card.grid_rowconfigure(1, weight=1)
         self.table_card.grid_columnconfigure(0, weight=1)
 
-        self.filter_row = ctk.CTkFrame(self.table_card, corner_radius=10)
+        self.filter_row = self._register_card(ctk.CTkFrame(self.table_card, corner_radius=10))
         self.filter_row.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
-        self.filter_row.grid_columnconfigure(12, weight=1)
+        self.filter_row.grid_columnconfigure(13, weight=1)
 
         ctk.CTkLabel(self.filter_row, text="Display Filters:").grid(row=0, column=0, padx=6, pady=8)
-
-        self.status_filter = ctk.CTkOptionMenu(
-            self.filter_row,
-            values=["All Ports", "Open Ports", "Closed Ports"],
-            variable=self.status_filter_var,
-            command=lambda _: self._rerender_table(),
-            corner_radius=10,
-            width=130,
-        )
+        self.status_filter = ctk.CTkOptionMenu(self.filter_row, values=["All Ports", "Open Ports", "Closed Ports"], variable=self.status_filter_var, command=lambda _: self._rerender_table(), corner_radius=10, width=130)
         self.status_filter.grid(row=0, column=1, padx=6, pady=8)
-
-        self.risk_filter = ctk.CTkOptionMenu(
-            self.filter_row,
-            values=["All Risk", "Low", "Average", "High"],
-            variable=self.risk_filter_var,
-            command=lambda _: self._rerender_table(),
-            corner_radius=10,
-            width=130,
-        )
+        self.risk_filter = ctk.CTkOptionMenu(self.filter_row, values=["All Risk", "Low", "Average", "High"], variable=self.risk_filter_var, command=lambda _: self._rerender_table(), corner_radius=10, width=130)
         self.risk_filter.grid(row=0, column=2, padx=6, pady=8)
-
-        ctk.CTkCheckBox(
-            self.filter_row,
-            text="Established-only",
-            variable=self.established_only_var,
-            command=self._rerender_table,
-        ).grid(row=0, column=3, padx=6, pady=8)
-
-        ctk.CTkButton(
-            self.filter_row,
-            text="Clear Filters",
-            corner_radius=10,
-            width=120,
-            command=self.clear_filters,
-        ).grid(row=0, column=4, padx=6, pady=8)
-
-        ctk.CTkButton(
-            self.filter_row,
-            text="Start Live Packet Stream",
-            corner_radius=10,
-            width=180,
-            command=self.start_live_packet_stream,
-        ).grid(row=0, column=5, padx=6, pady=8)
-
-        ctk.CTkButton(
-            self.filter_row,
-            text="Stop",
-            corner_radius=10,
-            width=80,
-            command=self.stop_live_packet_stream,
-        ).grid(row=0, column=6, padx=6, pady=8)
-
-        ctk.CTkButton(
-            self.filter_row,
-            text="Export packet slice",
-            corner_radius=10,
-            width=150,
-            command=self.export_packet_slice,
-        ).grid(row=0, column=7, padx=6, pady=8)
-
-        ctk.CTkButton(self.filter_row, text="◀", width=38, command=self._prev_table_page).grid(row=0, column=8, padx=(6, 2), pady=8)
-        ctk.CTkButton(self.filter_row, text="▶", width=38, command=self._next_table_page).grid(row=0, column=9, padx=(2, 6), pady=8)
+        ctk.CTkCheckBox(self.filter_row, text="Established-only", variable=self.established_only_var, command=self._rerender_table).grid(row=0, column=3, padx=6, pady=8)
+        ctk.CTkButton(self.filter_row, text="Clear Filters", corner_radius=10, width=120, command=self.clear_filters).grid(row=0, column=4, padx=6, pady=8)
+        ctk.CTkButton(self.filter_row, text="Clear Scan Logs", corner_radius=10, width=130, command=self.clear_scan_logs).grid(row=0, column=5, padx=6, pady=8)
+        ctk.CTkButton(self.filter_row, text="Start Live Packet Stream", corner_radius=10, width=180, command=self.start_live_packet_stream).grid(row=0, column=6, padx=6, pady=8)
+        ctk.CTkButton(self.filter_row, text="Stop", corner_radius=10, width=80, command=self.stop_live_packet_stream).grid(row=0, column=7, padx=6, pady=8)
+        ctk.CTkButton(self.filter_row, text="Export packet slice", corner_radius=10, width=150, command=self.export_packet_slice).grid(row=0, column=8, padx=6, pady=8)
+        ctk.CTkButton(self.filter_row, text="◀", width=38, command=self._prev_table_page).grid(row=0, column=9, padx=(6, 2), pady=8)
+        ctk.CTkButton(self.filter_row, text="▶", width=38, command=self._next_table_page).grid(row=0, column=10, padx=(2, 6), pady=8)
 
         self.packet_stream_status_var = ctk.StringVar(value="Live stream idle")
-        ctk.CTkLabel(self.filter_row, textvariable=self.packet_stream_status_var).grid(
-            row=0, column=10, padx=8, pady=8, sticky="w"
-        )
-
+        ctk.CTkLabel(self.filter_row, textvariable=self.packet_stream_status_var).grid(row=0, column=11, padx=8, pady=8, sticky="w")
         self.filter_summary_var = ctk.StringVar(value="Showing 0 / 0 rows")
-        ctk.CTkLabel(self.filter_row, textvariable=self.filter_summary_var).grid(row=0, column=12, padx=8, pady=8, sticky="e")
-        columns = (
-            "port",
-            "status",
-            "remote_ip",
-            "process",
-            "exe_path",
-            "location",
-            "provider",
-            "consensus",
-            "risk",
-            "containment",
-            "alerts",
-        )
+        ctk.CTkLabel(self.filter_row, textvariable=self.filter_summary_var).grid(row=0, column=13, padx=8, pady=8, sticky="e")
+
+        columns = ("port", "status", "remote_ip", "process", "exe_path", "location", "provider", "consensus", "risk", "containment", "alerts")
         self.results_table = ttk.Treeview(self.table_card, columns=columns, show="headings", selectmode="browse")
-
-        headings = {
-            "port": "Port",
-            "status": "Status",
-            "remote_ip": "Remote IP",
-            "process": "Process",
-            "exe_path": "Executable Path",
-            "location": "Location",
-            "provider": "Provider",
-            "consensus": "Consensus",
-            "risk": "Risk",
-            "containment": "Containment",
-            "alerts": "Alerts",
-        }
-        widths = {
-            "port": 80,
-            "status": 90,
-            "remote_ip": 170,
-            "process": 180,
-            "exe_path": 300,
-            "location": 160,
-            "provider": 170,
-            "consensus": 110,
-            "risk": 80,
-            "containment": 120,
-            "alerts": 200,
-        }
-
+        headings = {"port": "Port", "status": "Status", "remote_ip": "Remote IP", "process": "Process", "exe_path": "Executable Path", "location": "Location", "provider": "Provider", "consensus": "Consensus", "risk": "Risk", "containment": "Containment", "alerts": "Alerts"}
+        widths = {"port": 80, "status": 90, "remote_ip": 170, "process": 180, "exe_path": 300, "location": 160, "provider": 170, "consensus": 110, "risk": 80, "containment": 120, "alerts": 200}
         for name in columns:
             self.results_table.heading(name, text=headings[name])
             self.results_table.column(name, width=widths[name], anchor="center")
 
-        y_scroll = ttk.Scrollbar(self.table_card, orient="vertical", command=self.results_table.yview)
+        y_scroll = ttk.Scrollbar(self.table_card, orient="vertical", command=self.results_table.yview, style="NetScouter.Vertical.TScrollbar")
         self.results_table.configure(yscrollcommand=y_scroll.set)
-
         self.results_table.grid(row=1, column=0, sticky="nsew", padx=(10, 0), pady=(4, 6))
         y_scroll.grid(row=1, column=1, sticky="ns", padx=(0, 10), pady=(4, 6))
         self.results_table.bind("<<TreeviewSelect>>", self._on_table_select)
+        self.results_table.bind("<Double-1>", self._open_selected_row_report)
+        self.results_table.bind("<Motion>", self._on_table_hover)
+        self.results_table.bind("<Leave>", lambda _e: self._hide_table_tooltip())
 
-        self.packet_detail_card = ctk.CTkFrame(self.table_card, corner_radius=10)
+        self.packet_detail_card = self._register_card(ctk.CTkFrame(self.table_card, corner_radius=10))
         self.packet_detail_card.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
         self.packet_detail_card.grid_columnconfigure(0, weight=1)
-
         self.packet_detail_header_var = ctk.StringVar(value="Packet detail panel: select a row to inspect traffic")
-        ctk.CTkLabel(self.packet_detail_card, textvariable=self.packet_detail_header_var, anchor="w").grid(
-            row=0, column=0, sticky="ew", padx=8, pady=(8, 4)
-        )
-
-        self.packet_detail_box = ctk.CTkTextbox(self.packet_detail_card, corner_radius=10, height=120)
+        ctk.CTkLabel(self.packet_detail_card, textvariable=self.packet_detail_header_var, anchor="w").grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        self.packet_detail_box = ctk.CTkTextbox(self.packet_detail_card, corner_radius=10, height=140)
         self.packet_detail_box.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
 
-    def _build_console(self) -> None:
-        self.console_card = ctk.CTkFrame(self, corner_radius=10)
-        self.console_card.grid(row=2, column=0, sticky="nsew", padx=16, pady=(8, 16))
-        self.console_card.grid_rowconfigure(0, weight=1)
+    def _build_console(self, parent: ctk.CTkFrame, row: int, *, compact: bool = False) -> None:
+        self.console_card = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
+        self.console_card.grid(row=row, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.console_card.grid_rowconfigure(1, weight=0 if compact else 1)
         self.console_card.grid_columnconfigure(0, weight=1)
 
-        self.bottom_tabs = ctk.CTkTabview(self.console_card, corner_radius=10)
-        self.bottom_tabs.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        self.bottom_tabs.add("Scanner")
-        self.bottom_tabs.add("AI")
-        self.bottom_tabs.add("Firewall")
+        header = self._register_card(ctk.CTkFrame(self.console_card, corner_radius=10))
+        header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
+        ctk.CTkLabel(header, text="Console Logs").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        ctk.CTkButton(header, text="Clear Logs", width=110, command=self.clear_scan_logs).grid(row=0, column=1, padx=6, pady=6)
+        self.console = ctk.CTkTextbox(self.console_card, corner_radius=10, height=180 if compact else 320)
+        self.console.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
 
-        scanner_tab = self.bottom_tabs.tab("Scanner")
-        scanner_tab.grid_columnconfigure(0, weight=1)
-        scanner_tab.grid_rowconfigure(1, weight=1)
+    def _build_ai_auditor_tab(self, pane: ctk.CTkFrame) -> None:
+        pane.grid_columnconfigure(0, weight=1)
+        pane.grid_rowconfigure(4, weight=1)
 
-        scanner_header = ctk.CTkFrame(scanner_tab, corner_radius=10)
-        scanner_header.grid(row=0, column=0, sticky="ew", padx=0, pady=(0, 6))
-        ctk.CTkLabel(scanner_header, text="Console Logs").grid(row=0, column=0, sticky="w", padx=6, pady=6)
-        ctk.CTkButton(
-            scanner_header,
-            text="Export AI Audit",
-            corner_radius=10,
-            command=self.export_ai_audit,
-            width=120,
-        ).grid(row=0, column=1, padx=6, pady=6)
-        ctk.CTkButton(
-            scanner_header,
-            text="Export XLSX",
-            corner_radius=10,
-            command=self.export_xlsx,
-            width=110,
-        ).grid(row=0, column=2, padx=6, pady=6)
-
-        self.console = ctk.CTkTextbox(scanner_tab, corner_radius=10)
-        self.console.grid(row=1, column=0, sticky="nsew", padx=0, pady=(0, 0))
-
-        ai_tab = self.bottom_tabs.tab("AI")
-        ai_tab.grid_columnconfigure(0, weight=1)
-        ai_tab.grid_rowconfigure(3, weight=1)
-
-        ai_header = ctk.CTkFrame(ai_tab, corner_radius=10)
-        ai_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ai_header = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        ai_header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
         ctk.CTkLabel(ai_header, text="AI Feedback from Logs").grid(row=0, column=0, sticky="w", padx=6, pady=6)
-        ctk.CTkButton(
-            ai_header,
-            text="Analyze Logs",
-            corner_radius=10,
-            command=self.analyze_logs,
-            width=120,
-        ).grid(row=0, column=1, padx=6, pady=6)
-        ctk.CTkButton(
-            ai_header,
-            text="Cancel",
-            corner_radius=10,
-            command=self.cancel_ai_analysis,
-            width=90,
-        ).grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkButton(ai_header, text="Analyze Logs", corner_radius=10, command=self.analyze_logs, width=120).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkButton(ai_header, text="Cancel", corner_radius=10, command=self.cancel_ai_analysis, width=90).grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkButton(ai_header, text="Clear Logs", corner_radius=10, command=self.clear_ai_logs, width=100).grid(row=0, column=3, padx=6, pady=6)
 
-        self.ai_status_var = ctk.StringVar(
-            value="Run scans, then click Analyze Logs to query llama3.2:3b via Ollama."
-        )
-        ctk.CTkLabel(ai_tab, textvariable=self.ai_status_var, anchor="w", justify="left").grid(
-            row=1, column=0, sticky="ew", pady=(0, 6)
-        )
+        ai_filter_row = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        ai_filter_row.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
+        ctk.CTkCheckBox(ai_filter_row, text="High risk only", variable=self.ai_high_risk_only_var).grid(row=0, column=0, padx=6, pady=6)
+        ctk.CTkCheckBox(ai_filter_row, text="Open ports only", variable=self.ai_open_ports_only_var).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkCheckBox(ai_filter_row, text="Alerts only", variable=self.ai_alerts_only_var).grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkLabel(ai_filter_row, text="Max rows").grid(row=0, column=3, padx=(10, 4), pady=6)
+        ctk.CTkEntry(ai_filter_row, width=80, textvariable=self.ai_max_rows_var, placeholder_text="600").grid(row=0, column=4, padx=4, pady=6)
+        ctk.CTkLabel(ai_filter_row, textvariable=self.ai_elapsed_var).grid(row=0, column=5, padx=(12, 6), pady=6)
 
-        self.ai_progress = ctk.CTkProgressBar(ai_tab)
-        self.ai_progress.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        self.ai_status_var = ctk.StringVar(value="Run scans, choose AI filters, then Analyze Logs.")
+        ctk.CTkLabel(pane, textvariable=self.ai_status_var, anchor="w", justify="left").grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
+        self.ai_progress = ctk.CTkProgressBar(pane)
+        self.ai_progress.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 6))
         self.ai_progress.set(0)
+        self.ai_feedback_box = ctk.CTkTextbox(pane, corner_radius=10)
+        self.ai_feedback_box.grid(row=4, column=0, sticky="nsew", padx=8, pady=(0, 8))
 
-        self.ai_feedback_box = ctk.CTkTextbox(ai_tab, corner_radius=10)
-        self.ai_feedback_box.grid(row=3, column=0, sticky="nsew")
-
-        firewall_tab = self.bottom_tabs.tab("Firewall")
-        firewall_tab.grid_columnconfigure(0, weight=1)
-
-        firewall_header = ctk.CTkLabel(
-            firewall_tab,
-            text="Use confirmations before risky actions. Rollback hint: restore preset to Normal and remove temporary rules.",
-            justify="left",
-            anchor="w",
-        )
-        firewall_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-
-        actions_row = ctk.CTkFrame(firewall_tab, corner_radius=10)
-        actions_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-
-        ctk.CTkButton(actions_row, text="Refresh Status", command=self.refresh_firewall_insight, width=130).grid(row=0, column=0, padx=6, pady=6)
+    def _build_firewall_controls(self, parent: ctk.CTkFrame, *, start_row: int = 0) -> None:
+        actions_row = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
+        actions_row.grid(row=start_row, column=0, sticky="ew", padx=8, pady=(0, 8))
+        self.firewall_refresh_button = ctk.CTkButton(actions_row, text="Refresh Status", command=self.refresh_firewall_insight, width=130)
+        self.firewall_refresh_button.grid(row=0, column=0, padx=6, pady=6)
         ctk.CTkButton(actions_row, text="Toggle ON", command=lambda: self.toggle_firewall_from_ui(True), width=110).grid(row=0, column=1, padx=6, pady=6)
         ctk.CTkButton(actions_row, text="Toggle OFF", command=lambda: self.toggle_firewall_from_ui(False), width=110).grid(row=0, column=2, padx=6, pady=6)
         ctk.CTkOptionMenu(actions_row, values=["soft", "normal", "paranoid"], variable=self.firewall_preset_var, width=120).grid(row=0, column=3, padx=6, pady=6)
         ctk.CTkButton(actions_row, text="Apply Preset", command=self.apply_firewall_preset_from_ui, width=130).grid(row=0, column=4, padx=6, pady=6)
         ctk.CTkButton(actions_row, text="Panic Button", command=self.run_panic_button, fg_color="#DC2626", hover_color="#B91C1C", width=120).grid(row=0, column=5, padx=6, pady=6)
 
-        rule_row = ctk.CTkFrame(firewall_tab, corner_radius=10)
-        rule_row.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-
+        rule_row = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
+        rule_row.grid(row=start_row + 1, column=0, sticky="ew", padx=8, pady=(0, 8))
         ctk.CTkEntry(rule_row, textvariable=self.firewall_rule_name_var, width=180, placeholder_text="Rule name").grid(row=0, column=0, padx=6, pady=6)
         ctk.CTkOptionMenu(rule_row, values=["in", "out"], variable=self.firewall_direction_var, width=90).grid(row=0, column=1, padx=6, pady=6)
         ctk.CTkOptionMenu(rule_row, values=["allow", "block"], variable=self.firewall_action_var, width=100).grid(row=0, column=2, padx=6, pady=6)
@@ -577,6 +461,18 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkButton(rule_row, text="Add Rule", command=self.add_custom_rule_from_ui, width=100).grid(row=0, column=6, padx=6, pady=6)
         ctk.CTkButton(rule_row, text="Remove Rule", command=self.remove_custom_rule_from_ui, width=120).grid(row=0, column=7, padx=6, pady=6)
 
+    def _build_firewall_tab(self, pane: ctk.CTkFrame) -> None:
+        pane.grid_columnconfigure(0, weight=1)
+        info = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        info.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 8))
+        ctk.CTkLabel(
+            info,
+            text="Firewall controls were migrated to Intelligence for consolidated operations and logs.",
+            anchor="w",
+            justify="left",
+        ).grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        ctk.CTkButton(info, text="Go to Intelligence", command=lambda: self._show_workspace_tab("Intelligence"), width=150).grid(row=0, column=1, padx=10, pady=10)
+
     def _active_theme(self) -> dict[str, str]:
         return DARK_THEME if self.current_mode == "dark" else LIGHT_THEME
 
@@ -584,15 +480,7 @@ class NetScouterApp(ctk.CTk):
         theme = self._active_theme()
         self.configure(fg_color=theme["window"])
 
-        for card in (
-            self.control_card,
-            self.scan_row,
-            self.ops_row,
-            self.table_card,
-            self.filter_row,
-            self.packet_detail_card,
-            self.console_card,
-        ):
+        for card in self.theme_cards:
             card.configure(fg_color=theme["card"])
 
         self.scan_button.configure(fg_color=theme["scan"], text_color="#0B0E14" if self.current_mode == "dark" else "#FFFFFF")
@@ -609,6 +497,7 @@ class NetScouterApp(ctk.CTk):
         )
         style.configure("Treeview.Heading", background=theme["card"], foreground=theme["text"], relief="flat")
         style.map("Treeview", background=[("selected", theme["scan"])], foreground=[("selected", "#0B0E14")])
+        style.configure("NetScouter.Vertical.TScrollbar", gripcount=0, troughcolor=theme["window"], background=theme["scan"], bordercolor=theme["window"], arrowcolor=theme["text"], lightcolor=theme["scan"], darkcolor=theme["scan"])
 
         self.results_table.tag_configure("even", background=theme["card"])
         self.results_table.tag_configure("odd", background=theme["row_alt"])
@@ -622,7 +511,7 @@ class NetScouterApp(ctk.CTk):
 
     def _switch_theme(self, selected: str) -> None:
         selected_lower = selected.lower()
-        self.current_mode = "light" if "☀" in selected_lower or "sun" in selected_lower else "dark"
+        self.current_mode = "light" if selected_lower.startswith("light") else "dark"
         ctk.set_appearance_mode(self.current_mode)
         self._apply_theme()
         self._rerender_table()
@@ -969,6 +858,124 @@ class NetScouterApp(ctk.CTk):
         self._render_token += 1
         self._render_table_page(self._render_token)
 
+    def clear_scan_logs(self) -> None:
+        self.console.delete("1.0", "end")
+        self.log_line_count = 0
+        self.scan_results.clear()
+        self.filtered_rows.clear()
+        self._table_item_lookup.clear()
+        self.results_table.selection_remove(*self.results_table.selection())
+        self.packet_detail_box.delete("1.0", "end")
+        self.packet_detail_header_var.set("Packet detail panel: select a row to inspect traffic")
+        self._render_token += 1
+        self._render_table_page(self._render_token)
+        self._log("Scan logs and table rows cleared")
+
+    def _open_selected_row_report(self, _event: object | None = None) -> None:
+        selection = self.results_table.selection()
+        if not selection:
+            return
+        item = selection[0]
+        payload = self._table_item_lookup.get(item, {})
+        values = self.results_table.item(item, "values")
+        if not payload and not values:
+            return
+
+        report = ctk.CTkToplevel(self)
+        report.title("Port Intelligence Report")
+        report.geometry("900x520")
+        report.grid_columnconfigure(0, weight=1)
+        report.grid_rowconfigure(0, weight=1)
+
+        box = ctk.CTkTextbox(report, corner_radius=10)
+        box.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+
+        lines = ["Detailed result report", "=" * 72]
+        key_order = [
+            "port", "status", "remote_ip", "process", "pid", "exe_path", "location", "provider",
+            "country", "city", "consensus", "consensus_summary", "risk", "containment", "alerts",
+        ]
+        source = payload if payload else {
+            "port": values[0] if len(values) > 0 else "",
+            "status": values[1] if len(values) > 1 else "",
+            "remote_ip": values[2] if len(values) > 2 else "",
+            "process": values[3] if len(values) > 3 else "",
+            "exe_path": values[4] if len(values) > 4 else "",
+            "location": values[5] if len(values) > 5 else "",
+            "provider": values[6] if len(values) > 6 else "",
+            "consensus": values[7] if len(values) > 7 else "",
+            "risk": values[8] if len(values) > 8 else "",
+            "containment": values[9] if len(values) > 9 else "",
+            "alerts": values[10] if len(values) > 10 else "",
+        }
+        for key in key_order:
+            value = source.get(key, "")
+            if isinstance(value, list):
+                value = ", ".join(str(v) for v in value)
+            lines.append(f"{key:18}: {value}")
+
+        packets = self.packet_service.get_packets(remote_ip=str(source.get("remote_ip", "")), limit=20)
+        lines.append("\nRecent packet events")
+        lines.append("-" * 72)
+        if not packets:
+            lines.append("No packets captured yet for this host.")
+        else:
+            for packet in packets[-20:]:
+                lines.append(
+                    f"{packet.get('timestamp')} | {packet.get('proto')} | "
+                    f"{packet.get('src')}:{packet.get('raw', {}).get('src_port')} -> "
+                    f"{packet.get('dst')}:{packet.get('raw', {}).get('dst_port')} | "
+                    f"flags={packet.get('tcp_flags')} malformed={packet.get('malformed')}"
+                )
+
+        box.insert("1.0", "\n".join(lines))
+
+    def _on_table_hover(self, event: object) -> None:
+        if not hasattr(event, "x") or not hasattr(event, "y"):
+            return
+        row_id = self.results_table.identify_row(event.y)
+        col_id = self.results_table.identify_column(event.x)
+        if not row_id or not col_id:
+            self._hide_table_tooltip()
+            return
+        try:
+            col_index = int(col_id.replace("#", "")) - 1
+        except ValueError:
+            self._hide_table_tooltip()
+            return
+        values = self.results_table.item(row_id, "values")
+        if col_index < 0 or col_index >= len(values):
+            self._hide_table_tooltip()
+            return
+        text = str(values[col_index])
+        if len(text) < 30:
+            self._hide_table_tooltip()
+            return
+
+        x_root = self.results_table.winfo_rootx() + event.x + 18
+        y_root = self.results_table.winfo_rooty() + event.y + 18
+        if self._table_tooltip is None or not self._table_tooltip.winfo_exists():
+            self._table_tooltip = ctk.CTkToplevel(self)
+            self._table_tooltip.wm_overrideredirect(True)
+            self._table_tooltip.attributes("-topmost", True)
+            self._table_tooltip_label = ctk.CTkLabel(self._table_tooltip, text="", justify="left", anchor="w")
+            self._table_tooltip_label.pack(padx=8, pady=6)
+        if self._table_tooltip_label is not None:
+            self._table_tooltip_label.configure(text=text[:700])
+        self._table_tooltip.geometry(f"+{x_root}+{y_root}")
+        self._table_tooltip.deiconify()
+
+    def _hide_table_tooltip(self) -> None:
+        if self._table_tooltip and self._table_tooltip.winfo_exists():
+            self._table_tooltip.withdraw()
+
+    def show_local_network_info(self) -> None:
+        context = resolve_local_network_context()
+        local_ip = context.get("local_ip", "n/a")
+        public_ip = context.get("public_ip", "n/a")
+        self.local_info_var.set(f"LAN {local_ip} | WAN {public_ip}")
+        self._log(f"Local network info: LAN={local_ip} WAN={public_ip}")
+
     def clear_filters(self) -> None:
         self.status_filter_var.set("All Ports")
         self.risk_filter_var.set("All Risk")
@@ -1008,16 +1015,20 @@ class NetScouterApp(ctk.CTk):
             self._log("Select a row (or set target) before starting packet stream")
             return
 
+        self._log("Live packet stream prerequisites: run app as Administrator/root for packet capture permissions.")
         try:
             self.packet_service.start(target_ip, port=capture_port)
         except Exception as exc:  # noqa: BLE001
+            self.packet_stream_status_var.set("Live stream failed")
             self._log(f"Live packet stream failed to start: {exc}")
+            self._log("Troubleshooting: ensure Scapy/Npcap is installed and elevated privileges are granted.")
             return
 
         self.packet_alert_cache.clear()
-        self.packet_stream_status_var.set(f"Streaming {target_ip}")
+        stream_target = f"{target_ip}:{capture_port}" if capture_port else target_ip
+        self.packet_stream_status_var.set(f"Streaming {stream_target}")
         self.packet_detail_header_var.set(f"Packet detail panel for {target_ip}")
-        self._log(f"Live packet stream started for {target_ip}")
+        self._log(f"Live packet stream started for {stream_target}")
         self.after(350, self._poll_packet_stream)
 
     def stop_live_packet_stream(self) -> None:
@@ -1152,6 +1163,15 @@ class NetScouterApp(ctk.CTk):
             self._log("No recurring scan job to stop")
 
     def refresh_firewall_insight(self) -> None:
+        if self.firewall_refresh_in_progress:
+            self._log("Firewall insight refresh already running")
+            return
+        self.firewall_refresh_in_progress = True
+        self.firewall_status_var.set("Refreshing firewall status...")
+        for button_name in ("firewall_refresh_button", "ops_refresh_firewall_button"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.configure(state="disabled")
         threading.Thread(target=self._refresh_firewall_worker, daemon=True, name="firewall-insight").start()
 
     def toggle_firewall_from_ui(self, enabled: bool) -> None:
@@ -1250,17 +1270,17 @@ class NetScouterApp(ctk.CTk):
     def _log_operation_result(self, operation: str, result: dict[str, object]) -> None:
         message = str(result.get("message", result))
         status = "SUCCESS" if bool(result.get("success")) else "FAIL"
-        self._log(f"Firewall {operation} [{status}]: {message}")
+        self._log(f"🛡️ Firewall {operation} [{status}]: {message}")
 
         steps = result.get("steps")
         if isinstance(steps, list):
             for idx, step in enumerate(steps, start=1):
                 if not isinstance(step, dict):
-                    self._log(f"  step-{idx}: {step}")
                     continue
                 step_name = str(step.get("step", f"step-{idx}"))
-                step_ok = "SUCCESS" if bool(step.get("success")) else "FAIL"
-                self._log(f"  {step_name} [{step_ok}]: {step}")
+                step_ok = "OK" if bool(step.get("success")) else "WARN"
+                note = str(step.get("message") or step.get("action") or "completed")
+                self._log(f"  🧩 {step_name}: {step_ok} ({note})")
 
         self.after(0, self.refresh_firewall_insight)
 
@@ -1269,6 +1289,7 @@ class NetScouterApp(ctk.CTk):
             result = get_firewall_status()
         except Exception as exc:  # noqa: BLE001
             self.after(0, lambda: self._log(f"Firewall insight failed: {exc}"))
+            self.after(0, self._finish_firewall_refresh)
             return
 
         if result.get("success"):
@@ -1278,8 +1299,16 @@ class NetScouterApp(ctk.CTk):
             )
         else:
             status_text = str(result.get("message") or result)
-        self.after(0, lambda: self.firewall_status_var.set(status_text[:90]))
-        self.after(0, lambda: self._log(f"Firewall insight: {result}"))
+        self.after(0, lambda: self.firewall_status_var.set(status_text[:120]))
+        self.after(0, lambda: self._log(f"Firewall insight updated: {status_text}"))
+        self.after(0, self._finish_firewall_refresh)
+
+    def _finish_firewall_refresh(self) -> None:
+        self.firewall_refresh_in_progress = False
+        for button_name in ("firewall_refresh_button", "ops_refresh_firewall_button"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.configure(state="normal")
 
     def banish_selected_ip(self) -> None:
         selection = self.results_table.selection()
@@ -1572,7 +1601,7 @@ class NetScouterApp(ctk.CTk):
         self.after(0, self._open_charts_window)
 
     def export_ai_audit(self) -> None:
-        rows = self._scan_rows_for_reporting()
+        rows = self._rows_for_ai_analysis()
         if not rows:
             self._log("No results to export with current filters")
             return
@@ -1599,7 +1628,7 @@ class NetScouterApp(ctk.CTk):
         self._log(f"Exported AI audit report to {path}")
 
     def export_xlsx(self) -> None:
-        rows = self._scan_rows_for_reporting()
+        rows = self._rows_for_ai_analysis()
         if not rows:
             self._log("No results to export with current filters")
             return
@@ -1611,8 +1640,57 @@ class NetScouterApp(ctk.CTk):
         export_session_to_xlsx(rows, path, quarantine_logs=self.quarantine_events)
         self._log(f"Exported XLSX to {path}")
 
+    def clear_ai_logs(self) -> None:
+        self.ai_feedback_box.delete("1.0", "end")
+        self.ai_status_var.set("AI output cleared.")
+        self.ai_elapsed_var.set("Elapsed: 00:00")
+
+    def _rows_for_ai_analysis(self) -> list[dict[str, str | int | list[str]]]:
+        rows = list(self._scan_rows_for_reporting())
+        filtered: list[dict[str, str | int | list[str]]] = []
+        for row in rows:
+            risk = str(row.get("risk", "")).lower()
+            status = str(row.get("status", "")).lower()
+            alerts = row.get("alerts", [])
+            alert_text = ", ".join(str(a) for a in alerts) if isinstance(alerts, list) else str(alerts)
+
+            if self.ai_high_risk_only_var.get() and risk != "high":
+                continue
+            if self.ai_open_ports_only_var.get() and status != "open":
+                continue
+            if self.ai_alerts_only_var.get() and not alert_text.strip():
+                continue
+            filtered.append(row)
+
+        try:
+            max_rows = max(50, int(self.ai_max_rows_var.get().strip()))
+        except ValueError:
+            max_rows = 600
+        if len(filtered) > max_rows:
+            filtered = filtered[:max_rows]
+        return filtered
+
+    def _start_ai_stopwatch(self) -> None:
+        self.ai_started_at = datetime.now().timestamp()
+        self.ai_timer_token += 1
+        token = self.ai_timer_token
+
+        def tick() -> None:
+            if token != self.ai_timer_token or self.ai_started_at is None:
+                return
+            elapsed = int(datetime.now().timestamp() - self.ai_started_at)
+            mins, secs = divmod(elapsed, 60)
+            self.ai_elapsed_var.set(f"Elapsed: {mins:02d}:{secs:02d}")
+            self.after(1000, tick)
+
+        tick()
+
+    def _stop_ai_stopwatch(self) -> None:
+        self.ai_started_at = None
+        self.ai_timer_token += 1
+
     def analyze_logs(self) -> None:
-        rows = self._scan_rows_for_reporting()
+        rows = self._rows_for_ai_analysis()
         if not rows:
             self._log("No filtered results available for AI analysis")
             self.ai_status_var.set("No filtered scan data available. Adjust filters or run a scan.")
@@ -1624,8 +1702,9 @@ class NetScouterApp(ctk.CTk):
 
         self.ai_cancel_event.clear()
         self.ai_progress.set(0.05)
+        self._start_ai_stopwatch()
         self.ai_status_var.set("Checking local AI readiness...")
-        self.bottom_tabs.set("AI")
+        self._show_workspace_tab("AI Auditor")
         self.ai_job_thread = threading.Thread(
             target=self._analyze_logs_worker,
             kwargs={"rows": rows, "filter_model": self._current_filter_model()},
@@ -1638,10 +1717,12 @@ class NetScouterApp(ctk.CTk):
         ready = ensure_ai_readiness(console=self._log)
         if not ready:
             self.after(0, lambda: self.ai_status_var.set("AI readiness failed. Install/enable Ollama and llama3.2:3b."))
+            self.after(0, self._stop_ai_stopwatch)
             return
 
         if self.ai_cancel_event.is_set():
             self.after(0, lambda: self.ai_status_var.set("AI analysis cancelled."))
+            self.after(0, self._stop_ai_stopwatch)
             return
 
         context = resolve_local_network_context()
@@ -1659,6 +1740,7 @@ class NetScouterApp(ctk.CTk):
         def publish() -> None:
             self.ai_feedback_box.delete("1.0", "end")
             self.ai_progress.set(1.0 if ok else 0)
+            self._stop_ai_stopwatch()
             if ok:
                 self.ai_feedback_box.insert("1.0", output)
                 self.ai_status_var.set("AI analysis complete.")
@@ -1669,7 +1751,7 @@ class NetScouterApp(ctk.CTk):
                     self.ai_status_var.set("AI analysis cancelled.")
                     self._log("AI analysis cancelled by user")
                 else:
-                    self.ai_status_var.set("AI analysis failed.")
+                    self.ai_status_var.set("AI analysis failed. Try reducing rows or increasing timeout.")
                     self._log(f"AI analysis failed: {output}")
 
         self.after(0, publish)
@@ -1686,6 +1768,7 @@ class NetScouterApp(ctk.CTk):
             self.ai_status_var.set("Cancelling AI analysis...")
         else:
             self.ai_status_var.set("No active AI analysis job.")
+            self._stop_ai_stopwatch()
 
     def show_charts(self) -> None:
         if not self.scan_results:
@@ -1698,6 +1781,7 @@ class NetScouterApp(ctk.CTk):
             self.scan_job.cancel()
 
         self.packet_service.stop(timeout=0.8)
+        self._hide_table_tooltip()
         self.honeypot.stop(timeout=0.8)
 
         if self.scheduler.running:
