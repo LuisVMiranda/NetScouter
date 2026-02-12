@@ -8,7 +8,8 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-from typing import Any, Iterable
+from threading import Event
+from typing import Any, Callable, Iterable
 
 import pandas as pd
 import requests
@@ -242,12 +243,87 @@ def build_rag_lines(scan_results: Iterable[dict[str, Any]], limit: int = 300) ->
     return lines
 
 
+
+def _normalize_signature(entry: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(entry.get("remote_ip") or entry.get("ip") or ""),
+        str(entry.get("port", "")),
+        str(entry.get("risk") or entry.get("risk_level") or ""),
+        str(entry.get("status", "")),
+    )
+
+
+def deduplicate_scan_rows(scan_results: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for entry in scan_results:
+        key = _normalize_signature(entry)
+        existing = deduped.get(key)
+        if existing is None:
+            deduped[key] = dict(entry)
+            deduped[key]["_hits"] = 1
+            continue
+        existing["_hits"] = int(existing.get("_hits", 1)) + 1
+    return list(deduped.values())
+
+
+def compress_rows_by_patterns(rows: Iterable[dict[str, Any]]) -> list[str]:
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        ip = str(row.get("remote_ip") or row.get("ip") or "")
+        risk = str(row.get("risk") or row.get("risk_level") or "average")
+        key = (ip, risk.lower())
+        bucket = grouped.setdefault(
+            key,
+            {
+                "ports": set(),
+                "statuses": set(),
+                "hits": 0,
+                "provider": str(row.get("provider") or "Unknown"),
+                "location": str(row.get("location") or "Unknown"),
+            },
+        )
+        bucket["ports"].add(str(row.get("port", "")))
+        bucket["statuses"].add(str(row.get("status", "")))
+        bucket["hits"] += int(row.get("_hits", 1))
+
+    compressed: list[str] = []
+    for (ip, risk), info in grouped.items():
+        ports = ",".join(sorted(info["ports"]))
+        statuses = ",".join(sorted(info["statuses"]))
+        compressed.append(
+            f"IP={ip} risk={risk} hits={info['hits']} ports=[{ports}] statuses=[{statuses}] "
+            f"provider={info['provider']} location={info['location']}"
+        )
+    return compressed
+
+
+def chunk_lines(lines: list[str], chunk_size: int = 28) -> list[list[str]]:
+    if chunk_size <= 0:
+        chunk_size = 28
+    return [lines[idx : idx + chunk_size] for idx in range(0, len(lines), chunk_size)]
+
+
+def merge_chunk_findings(chunk_findings: list[str]) -> str:
+    body = "\n\n".join(f"Chunk {index + 1}:\n{text}" for index, text in enumerate(chunk_findings))
+    return "\n".join(
+        [
+            "Merged Findings Summary:",
+            body,
+            "",
+            "Final recommendation: prioritize repeated high-risk IPs that target multiple ports.",
+        ]
+    )
+
+
 def analyze_logs_with_ollama(
     scan_results: Iterable[dict[str, Any]],
     *,
     context: dict[str, Any] | None = None,
     model_name: str = "llama3.2:3b",
     timeout_seconds: int = 120,
+    filter_model: dict[str, Any] | None = None,
+    progress_callback: Callable[[float, str], None] | None = None,
+    cancel_event: Event | None = None,
 ) -> tuple[bool, str]:
     """Run a local Ollama model against NetScouter logs and return analysis text."""
     executable = shutil.which("ollama")
@@ -257,42 +333,69 @@ def analyze_logs_with_ollama(
     runtime_context = context or resolve_local_network_context()
     system_prompt_a = build_analyst_prompt()
     system_prompt_b = build_network_engine_prompt(runtime_context)
-    rag_lines = build_rag_lines(scan_results)
-    prompt = "\n".join(
-        [
-            "SYSTEM PROMPT A:",
-            system_prompt_a,
-            "",
-            "SYSTEM PROMPT B:",
-            system_prompt_b,
-            "",
-            "NETWORK LOGS:",
-            *rag_lines,
-            "",
-            "Provide concise findings, suspicious IPs, and recommended firewall actions.",
-        ]
-    )
 
-    try:
-        proc = subprocess.run(
-            [executable, "run", model_name, prompt],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
+    deduped = deduplicate_scan_rows(scan_results)
+    compressed_lines = compress_rows_by_patterns(deduped)
+    if not compressed_lines:
+        return False, "No log rows available after filtering and deduplication."
+
+    if progress_callback:
+        progress_callback(0.35, f"Prepared {len(deduped)} deduplicated rows across {len(compressed_lines)} patterns")
+
+    chunks = chunk_lines(compressed_lines)
+    chunk_outputs: list[str] = []
+    total = len(chunks)
+
+    for index, chunk in enumerate(chunks, start=1):
+        if cancel_event and cancel_event.is_set():
+            return False, "AI analysis cancelled before completion."
+
+        filter_summary = json.dumps(filter_model or {}, sort_keys=True)
+        prompt = "\n".join(
+            [
+                "SYSTEM PROMPT A:",
+                system_prompt_a,
+                "",
+                "SYSTEM PROMPT B:",
+                system_prompt_b,
+                "",
+                f"ACTIVE FILTERS: {filter_summary}",
+                f"CHUNK {index}/{total} COMPRESSED LOGS:",
+                *chunk,
+                "",
+                "Return top suspicious patterns and firewall actions for this chunk.",
+            ]
         )
-    except subprocess.TimeoutExpired:
-        return False, f"Ollama analysis timed out after {timeout_seconds} seconds."
-    except Exception as exc:  # noqa: BLE001
-        return False, f"Ollama analysis failed to start: {exc}"
 
-    output = (proc.stdout or "").strip()
-    if proc.returncode != 0:
-        err = (proc.stderr or output or "unknown error").strip()
-        return False, f"Ollama analysis failed: {err}"
-    if not output:
-        return False, "Ollama returned empty output."
-    return True, output
+        try:
+            proc = subprocess.run(
+                [executable, "run", model_name, prompt],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"Ollama analysis timed out after {timeout_seconds} seconds."
+        except Exception as exc:  # noqa: BLE001
+            return False, f"Ollama analysis failed to start: {exc}"
+
+        output = (proc.stdout or "").strip()
+        if proc.returncode != 0:
+            err = (proc.stderr or output or "unknown error").strip()
+            return False, f"Ollama analysis failed: {err}"
+        if not output:
+            return False, "Ollama returned empty output."
+
+        chunk_outputs.append(output)
+        if progress_callback:
+            pct = 0.35 + (0.6 * index / total)
+            progress_callback(pct, f"Analyzed chunk {index}/{total}...")
+
+    merged = merge_chunk_findings(chunk_outputs)
+    if progress_callback:
+        progress_callback(0.98, "Merging chunk findings...")
+    return True, merged
 
 
 def export_session_to_xlsx(

@@ -79,6 +79,8 @@ RISK_COLORS = {
 QUEUE_BATCH_LIMIT = 120
 MAX_LOG_LINES = 2000
 PACKET_SLICE_LIMIT = 120
+TABLE_PAGE_SIZE = 200
+TABLE_RENDER_CHUNK_SIZE = 40
 SUSPICIOUS_PROCESS_NAMES = {
     "svchost.exe",
     "lsass.exe",
@@ -132,14 +134,16 @@ class NetScouterApp(ctk.CTk):
         self.firewall_protocol_var = ctk.StringVar(value="tcp")
         self.firewall_preset_var = ctk.StringVar(value="normal")
 
-        self.status_filter_var = ctk.StringVar(value="All Status")
+        self.status_filter_var = ctk.StringVar(value="All Ports")
         self.risk_filter_var = ctk.StringVar(value="All Risk")
+        self.established_only_var = ctk.BooleanVar(value=False)
         self.timeline_status_var = ctk.StringVar(value="All Status")
         self.timeline_risk_var = ctk.StringVar(value="All Risk")
         self.timeline_source_ip_var = ctk.StringVar(value="")
         self.auto_block_consensus_var = ctk.BooleanVar(value=False)
         self.reputation_threshold_var = ctk.StringVar(value="3")
         self.reputation_timeout_var = ctk.StringVar(value="4")
+        self.ai_timeout_var = ctk.StringVar(value="120")
         self.abuseipdb_key_var = ctk.StringVar(value=os.getenv("ABUSEIPDB_API_KEY", ""))
         self.virustotal_key_var = ctk.StringVar(
             value=os.getenv("VIRUSTOTAL_API_KEY", "") or os.getenv("VT_API_KEY", "")
@@ -147,6 +151,12 @@ class NetScouterApp(ctk.CTk):
         self.otx_key_var = ctk.StringVar(value=os.getenv("OTX_API_KEY", ""))
         self.auto_blocked_ips: set[str] = set()
         self.auto_block_guard = threading.Lock()
+        self.filtered_rows: list[dict[str, str | int | list[str]]] = []
+        self.table_page_start = 0
+        self._render_token = 0
+        self._table_item_lookup: dict[str, dict[str, str | int | list[str]]] = {}
+        self.ai_cancel_event = threading.Event()
+        self.ai_job_thread: threading.Thread | None = None
 
         self._configure_grid()
         self._build_controls()
@@ -238,7 +248,7 @@ class NetScouterApp(ctk.CTk):
             corner_radius=10,
             command=self.stop_recurring_scan,
             width=120,
-        ).grid(row=0, column=3, padx=6, pady=8)
+        ).grid(row=0, column=5, padx=6, pady=8)
 
         ctk.CTkButton(
             self.ops_row,
@@ -300,18 +310,20 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkEntry(self.settings_row, width=55, textvariable=self.reputation_threshold_var).grid(row=0, column=5, padx=4, pady=8)
         ctk.CTkLabel(self.settings_row, text="Timeout (s)").grid(row=0, column=6, padx=(8, 4), pady=8)
         ctk.CTkEntry(self.settings_row, width=55, textvariable=self.reputation_timeout_var).grid(row=0, column=7, padx=4, pady=8)
+        ctk.CTkLabel(self.settings_row, text="AI Timeout (s)").grid(row=0, column=8, padx=(8, 4), pady=8)
+        ctk.CTkEntry(self.settings_row, width=65, textvariable=self.ai_timeout_var).grid(row=0, column=9, padx=4, pady=8)
 
         ctk.CTkCheckBox(
             self.settings_row,
             text="Auto-block by consensus",
             variable=self.auto_block_consensus_var,
-        ).grid(row=0, column=8, padx=8, pady=8)
+        ).grid(row=0, column=10, padx=8, pady=8)
         ctk.CTkButton(
             self.settings_row,
             text="Apply Settings",
             command=self.apply_settings,
             width=120,
-        ).grid(row=0, column=9, padx=(4, 8), pady=8)
+        ).grid(row=0, column=11, padx=(4, 8), pady=8)
 
     def _build_results_table(self) -> None:
         self.table_card = ctk.CTkFrame(self, corner_radius=10)
@@ -321,13 +333,13 @@ class NetScouterApp(ctk.CTk):
 
         self.filter_row = ctk.CTkFrame(self.table_card, corner_radius=10)
         self.filter_row.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
-        self.filter_row.grid_columnconfigure(8, weight=1)
+        self.filter_row.grid_columnconfigure(12, weight=1)
 
         ctk.CTkLabel(self.filter_row, text="Display Filters:").grid(row=0, column=0, padx=6, pady=8)
 
         self.status_filter = ctk.CTkOptionMenu(
             self.filter_row,
-            values=["All Status", "Open", "Closed"],
+            values=["All Ports", "Open Ports", "Closed Ports"],
             variable=self.status_filter_var,
             command=lambda _: self._rerender_table(),
             corner_radius=10,
@@ -345,13 +357,20 @@ class NetScouterApp(ctk.CTk):
         )
         self.risk_filter.grid(row=0, column=2, padx=6, pady=8)
 
+        ctk.CTkCheckBox(
+            self.filter_row,
+            text="Established-only",
+            variable=self.established_only_var,
+            command=self._rerender_table,
+        ).grid(row=0, column=3, padx=6, pady=8)
+
         ctk.CTkButton(
             self.filter_row,
             text="Clear Filters",
             corner_radius=10,
             width=120,
             command=self.clear_filters,
-        ).grid(row=0, column=3, padx=6, pady=8)
+        ).grid(row=0, column=4, padx=6, pady=8)
 
         ctk.CTkButton(
             self.filter_row,
@@ -359,7 +378,7 @@ class NetScouterApp(ctk.CTk):
             corner_radius=10,
             width=180,
             command=self.start_live_packet_stream,
-        ).grid(row=0, column=4, padx=6, pady=8)
+        ).grid(row=0, column=5, padx=6, pady=8)
 
         ctk.CTkButton(
             self.filter_row,
@@ -367,7 +386,7 @@ class NetScouterApp(ctk.CTk):
             corner_radius=10,
             width=80,
             command=self.stop_live_packet_stream,
-        ).grid(row=0, column=5, padx=6, pady=8)
+        ).grid(row=0, column=6, padx=6, pady=8)
 
         ctk.CTkButton(
             self.filter_row,
@@ -375,16 +394,18 @@ class NetScouterApp(ctk.CTk):
             corner_radius=10,
             width=150,
             command=self.export_packet_slice,
-        ).grid(row=0, column=6, padx=6, pady=8)
+        ).grid(row=0, column=7, padx=6, pady=8)
+
+        ctk.CTkButton(self.filter_row, text="◀", width=38, command=self._prev_table_page).grid(row=0, column=8, padx=(6, 2), pady=8)
+        ctk.CTkButton(self.filter_row, text="▶", width=38, command=self._next_table_page).grid(row=0, column=9, padx=(2, 6), pady=8)
 
         self.packet_stream_status_var = ctk.StringVar(value="Live stream idle")
         ctk.CTkLabel(self.filter_row, textvariable=self.packet_stream_status_var).grid(
-            row=0, column=7, padx=8, pady=8, sticky="w"
+            row=0, column=10, padx=8, pady=8, sticky="w"
         )
 
         self.filter_summary_var = ctk.StringVar(value="Showing 0 / 0 rows")
-        ctk.CTkLabel(self.filter_row, textvariable=self.filter_summary_var).grid(row=0, column=8, padx=8, pady=8, sticky="e")
-
+        ctk.CTkLabel(self.filter_row, textvariable=self.filter_summary_var).grid(row=0, column=12, padx=8, pady=8, sticky="e")
         columns = (
             "port",
             "status",
@@ -489,7 +510,7 @@ class NetScouterApp(ctk.CTk):
 
         ai_tab = self.bottom_tabs.tab("AI")
         ai_tab.grid_columnconfigure(0, weight=1)
-        ai_tab.grid_rowconfigure(2, weight=1)
+        ai_tab.grid_rowconfigure(3, weight=1)
 
         ai_header = ctk.CTkFrame(ai_tab, corner_radius=10)
         ai_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
@@ -501,6 +522,13 @@ class NetScouterApp(ctk.CTk):
             command=self.analyze_logs,
             width=120,
         ).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkButton(
+            ai_header,
+            text="Cancel",
+            corner_radius=10,
+            command=self.cancel_ai_analysis,
+            width=90,
+        ).grid(row=0, column=2, padx=6, pady=6)
 
         self.ai_status_var = ctk.StringVar(
             value="Run scans, then click Analyze Logs to query llama3.2:3b via Ollama."
@@ -509,8 +537,12 @@ class NetScouterApp(ctk.CTk):
             row=1, column=0, sticky="ew", pady=(0, 6)
         )
 
+        self.ai_progress = ctk.CTkProgressBar(ai_tab)
+        self.ai_progress.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        self.ai_progress.set(0)
+
         self.ai_feedback_box = ctk.CTkTextbox(ai_tab, corner_radius=10)
-        self.ai_feedback_box.grid(row=2, column=0, sticky="nsew")
+        self.ai_feedback_box.grid(row=3, column=0, sticky="nsew")
 
         firewall_tab = self.bottom_tabs.tab("Firewall")
         firewall_tab.grid_columnconfigure(0, weight=1)
@@ -730,7 +762,7 @@ class NetScouterApp(ctk.CTk):
         os.environ["ABUSEIPDB_API_KEY"] = self.abuseipdb_key_var.get().strip()
         os.environ["VIRUSTOTAL_API_KEY"] = self.virustotal_key_var.get().strip()
         os.environ["OTX_API_KEY"] = self.otx_key_var.get().strip()
-        self._log("Settings applied (API keys, consensus threshold, timeout, auto-block preference)")
+        self._log("Settings applied (API keys, consensus threshold, reputation timeout, AI timeout, auto-block preference)")
 
     def _consensus_threshold(self) -> int:
         try:
@@ -743,6 +775,15 @@ class NetScouterApp(ctk.CTk):
             return max(1.0, float(self.reputation_timeout_var.get().strip()))
         except ValueError:
             return 4.0
+
+    def _ai_timeout(self) -> int:
+        try:
+            return max(30, int(float(self.ai_timeout_var.get().strip())))
+        except ValueError:
+            return 120
+
+    def _scan_rows_for_reporting(self) -> list[dict[str, str | int | list[str]]]:
+        return self._filtered_scan_rows()
 
     def _queue_auto_block_if_needed(self, remote_ip: str, should_block: bool, consensus_score: str) -> None:
         if not self.auto_block_consensus_var.get() or not should_block:
@@ -834,48 +875,104 @@ class NetScouterApp(ctk.CTk):
         self.ui_queue.put(payload)
         self._queue_auto_block_if_needed(scan_result.host, should_block, consensus_score)
 
+    def _current_filter_model(self) -> dict[str, str | bool]:
+        return {
+            "status": self.status_filter_var.get(),
+            "risk": self.risk_filter_var.get(),
+            "established_only": bool(self.established_only_var.get()),
+        }
+
+    def _filtered_scan_rows(self) -> list[dict[str, str | int | list[str]]]:
+        return [row for row in self.scan_results if self._passes_filters(row)]
+
     def _passes_filters(self, row: dict[str, str | int | list[str]]) -> bool:
         selected_status = self.status_filter_var.get()
         selected_risk = self.risk_filter_var.get()
+        established_only = bool(self.established_only_var.get())
 
-        if selected_status != "All Status" and str(row.get("status", "")).lower() != selected_status.lower():
+        status = str(row.get("status", "")).lower()
+        if selected_status == "Open Ports" and status != "open":
             return False
+        if selected_status == "Closed Ports" and status != "closed":
+            return False
+
         if selected_risk != "All Risk" and str(row.get("risk", "")).lower() != selected_risk.lower():
+            return False
+        if established_only and status != "open":
             return False
         return True
 
+    def _insert_result_row(self, payload: dict[str, str | int | list[str]], index: int) -> None:
+        stripe_tag = "even" if index % 2 == 0 else "odd"
+        risk_tag = f"risk_{str(payload['risk']).lower()}"
+        item_id = self.results_table.insert(
+            "",
+            "end",
+            values=(
+                payload["port"],
+                payload["status"],
+                payload["remote_ip"],
+                payload["process_label"],
+                payload["exe_path"],
+                payload["location"],
+                payload["provider"],
+                payload["consensus"],
+                payload["risk"],
+                payload.get("containment", "None"),
+                payload["alerts"],
+            ),
+            tags=(stripe_tag, risk_tag),
+        )
+        self._table_item_lookup[item_id] = payload
+
     def _rerender_table(self) -> None:
-        for item in self.results_table.get_children():
-            self.results_table.delete(item)
+        self.table_page_start = 0
+        self._render_token += 1
+        self.filtered_rows = self._filtered_scan_rows()
+        self._render_table_page(self._render_token)
 
-        visible = [row for row in self.scan_results if self._passes_filters(row)]
-        for index, payload in enumerate(visible):
-            stripe_tag = "even" if index % 2 == 0 else "odd"
-            risk_tag = f"risk_{str(payload['risk']).lower()}"
-            self.results_table.insert(
-                "",
-                "end",
-                values=(
-                    payload["port"],
-                    payload["status"],
-                    payload["remote_ip"],
-                    payload["process_label"],
-                    payload["exe_path"],
-                    payload["location"],
-                    payload["provider"],
-                    payload["consensus"],
-                    payload["risk"],
-                    payload.get("containment", "None"),
-                    payload["alerts"],
-                ),
-                tags=(stripe_tag, risk_tag),
-            )
+    def _render_table_page(self, token: int, offset: int = 0) -> None:
+        if token != self._render_token:
+            return
+        if offset == 0:
+            self._table_item_lookup.clear()
+            for item in self.results_table.get_children():
+                self.results_table.delete(item)
 
-        self.filter_summary_var.set(f"Showing {len(visible)} / {len(self.scan_results)} rows")
+        page_rows = self.filtered_rows[self.table_page_start : self.table_page_start + TABLE_PAGE_SIZE]
+        chunk = page_rows[offset : offset + TABLE_RENDER_CHUNK_SIZE]
+        for index, payload in enumerate(chunk, start=offset):
+            self._insert_result_row(payload, index)
+
+        if offset + TABLE_RENDER_CHUNK_SIZE < len(page_rows):
+            self.after(1, lambda: self._render_table_page(token, offset + TABLE_RENDER_CHUNK_SIZE))
+            return
+
+        page_start = self.table_page_start + 1 if page_rows else 0
+        page_end = self.table_page_start + len(page_rows)
+        self.filter_summary_var.set(
+            f"Showing {len(self.filtered_rows)} / {len(self.scan_results)} rows | Page rows {page_start}-{page_end}"
+        )
+
+    def _prev_table_page(self) -> None:
+        if self.table_page_start <= 0:
+            return
+        self.table_page_start = max(0, self.table_page_start - TABLE_PAGE_SIZE)
+        self._render_token += 1
+        self._render_table_page(self._render_token)
+
+    def _next_table_page(self) -> None:
+        next_start = self.table_page_start + TABLE_PAGE_SIZE
+        if next_start >= len(self.filtered_rows):
+            return
+        self.table_page_start = next_start
+        self._render_token += 1
+        self._render_table_page(self._render_token)
 
     def clear_filters(self) -> None:
-        self.status_filter_var.set("All Status")
+        self.status_filter_var.set("All Ports")
         self.risk_filter_var.set("All Risk")
+        self.established_only_var.set(False)
         self._rerender_table()
 
     def _on_table_select(self, _event: object | None = None) -> None:
@@ -883,15 +980,17 @@ class NetScouterApp(ctk.CTk):
         if not selection:
             return
 
-        values = self.results_table.item(selection[0], "values")
-        if len(values) < 3:
+        selected_item = selection[0]
+        payload = self._table_item_lookup.get(selected_item, {})
+        values = self.results_table.item(selected_item, "values")
+        if len(values) < 3 and not payload:
             return
 
-        selected_ip = str(values[2]).strip()
+        selected_ip = str(payload.get("remote_ip") or values[2]).strip()
         selected_port = None
         try:
-            selected_port = int(str(values[0]).strip())
-        except ValueError:
+            selected_port = int(payload.get("port") or str(values[0]).strip())
+        except (TypeError, ValueError):
             selected_port = None
         if not selected_ip:
             return
@@ -1005,36 +1104,13 @@ class NetScouterApp(ctk.CTk):
 
             self.scan_results.append(payload)
             append_scan_result(payload)
-            if self._passes_filters(payload):
-                inserted_index = len(self.results_table.get_children())
-                stripe_tag = "even" if inserted_index % 2 == 0 else "odd"
-                risk_tag = f"risk_{str(payload['risk']).lower()}"
-                self.results_table.insert(
-                    "",
-                    "end",
-                    values=(
-                        payload["port"],
-                        payload["status"],
-                        payload["remote_ip"],
-                        payload["process_label"],
-                        payload["exe_path"],
-                        payload["location"],
-                        payload["provider"],
-                        payload["consensus"],
-                        payload["risk"],
-                        payload.get("containment", "None"),
-                        payload["alerts"],
-                    ),
-                    tags=(stripe_tag, risk_tag),
-                )
 
             if processed % 4 == 0:
                 self._log(f"Port {payload['port']} on {payload['remote_ip']}: {payload['status']} | Risk {payload['risk']}")
             processed += 1
 
         if processed > 0:
-            visible_count = sum(1 for row in self.scan_results if self._passes_filters(row))
-            self.filter_summary_var.set(f"Showing {visible_count} / {len(self.scan_results)} rows")
+            self._rerender_table()
 
         self.after(20 if processed >= QUEUE_BATCH_LIMIT else 120, self._drain_ui_queue)
 
@@ -1496,8 +1572,9 @@ class NetScouterApp(ctk.CTk):
         self.after(0, self._open_charts_window)
 
     def export_ai_audit(self) -> None:
-        if not self.scan_results:
-            self._log("No results to export")
+        rows = self._scan_rows_for_reporting()
+        if not rows:
+            self._log("No results to export with current filters")
             return
 
         ready = ensure_ai_readiness(console=self._log)
@@ -1513,7 +1590,7 @@ class NetScouterApp(ctk.CTk):
         analyst_prompt = build_analyst_prompt()
         engine_prompt = build_network_engine_prompt(context)
         export_ai_audit_report(
-            self.scan_results,
+            rows,
             path,
             analyst_prompt=analyst_prompt,
             network_prompt=engine_prompt,
@@ -1522,49 +1599,93 @@ class NetScouterApp(ctk.CTk):
         self._log(f"Exported AI audit report to {path}")
 
     def export_xlsx(self) -> None:
-        if not self.scan_results:
-            self._log("No results to export")
+        rows = self._scan_rows_for_reporting()
+        if not rows:
+            self._log("No results to export with current filters")
             return
 
         path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")])
         if not path:
             return
 
-        export_session_to_xlsx(self.scan_results, path, quarantine_logs=self.quarantine_events)
+        export_session_to_xlsx(rows, path, quarantine_logs=self.quarantine_events)
         self._log(f"Exported XLSX to {path}")
 
     def analyze_logs(self) -> None:
-        if not self.scan_results:
-            self._log("No results available for AI analysis")
-            self.ai_status_var.set("No scan data available. Run a scan first.")
+        rows = self._scan_rows_for_reporting()
+        if not rows:
+            self._log("No filtered results available for AI analysis")
+            self.ai_status_var.set("No filtered scan data available. Adjust filters or run a scan.")
             return
 
+        if self.ai_job_thread and self.ai_job_thread.is_alive():
+            self._log("AI analysis already running")
+            return
+
+        self.ai_cancel_event.clear()
+        self.ai_progress.set(0.05)
         self.ai_status_var.set("Checking local AI readiness...")
         self.bottom_tabs.set("AI")
-        threading.Thread(target=self._analyze_logs_worker, daemon=True, name="ai-analyze-worker").start()
+        self.ai_job_thread = threading.Thread(
+            target=self._analyze_logs_worker,
+            kwargs={"rows": rows, "filter_model": self._current_filter_model()},
+            daemon=True,
+            name="ai-analyze-worker",
+        )
+        self.ai_job_thread.start()
 
-    def _analyze_logs_worker(self) -> None:
+    def _analyze_logs_worker(self, *, rows: list[dict[str, str | int | list[str]]], filter_model: dict[str, str | bool]) -> None:
         ready = ensure_ai_readiness(console=self._log)
         if not ready:
             self.after(0, lambda: self.ai_status_var.set("AI readiness failed. Install/enable Ollama and llama3.2:3b."))
             return
 
+        if self.ai_cancel_event.is_set():
+            self.after(0, lambda: self.ai_status_var.set("AI analysis cancelled."))
+            return
+
         context = resolve_local_network_context()
         self.after(0, lambda: self.ai_status_var.set("Running Ollama analysis..."))
-        ok, output = analyze_logs_with_ollama(self.scan_results, context=context)
+        self.after(0, lambda: self.ai_progress.set(0.25))
+        ok, output = analyze_logs_with_ollama(
+            rows,
+            context=context,
+            timeout_seconds=self._ai_timeout(),
+            filter_model=filter_model,
+            progress_callback=lambda pct, msg: self.after(0, lambda p=pct, m=msg: self._set_ai_progress(p, m)),
+            cancel_event=self.ai_cancel_event,
+        )
 
         def publish() -> None:
             self.ai_feedback_box.delete("1.0", "end")
+            self.ai_progress.set(1.0 if ok else 0)
             if ok:
                 self.ai_feedback_box.insert("1.0", output)
                 self.ai_status_var.set("AI analysis complete.")
                 self._log("AI analysis complete (see AI tab).")
             else:
                 self.ai_feedback_box.insert("1.0", output)
-                self.ai_status_var.set("AI analysis failed.")
-                self._log(f"AI analysis failed: {output}")
+                if self.ai_cancel_event.is_set():
+                    self.ai_status_var.set("AI analysis cancelled.")
+                    self._log("AI analysis cancelled by user")
+                else:
+                    self.ai_status_var.set("AI analysis failed.")
+                    self._log(f"AI analysis failed: {output}")
 
         self.after(0, publish)
+
+    def _set_ai_progress(self, progress: float, message: str) -> None:
+        bounded = max(0.0, min(1.0, progress))
+        self.ai_progress.set(bounded)
+        if message:
+            self.ai_status_var.set(message)
+
+    def cancel_ai_analysis(self) -> None:
+        if self.ai_job_thread and self.ai_job_thread.is_alive():
+            self.ai_cancel_event.set()
+            self.ai_status_var.set("Cancelling AI analysis...")
+        else:
+            self.ai_status_var.set("No active AI analysis job.")
 
     def show_charts(self) -> None:
         if not self.scan_results:
