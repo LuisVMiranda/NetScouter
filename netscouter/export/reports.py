@@ -202,6 +202,81 @@ def build_network_engine_prompt(public_ip_lookup: dict[str, Any] | None = None) 
     )
 
 
+def build_rag_lines(scan_results: Iterable[dict[str, Any]], limit: int = 300) -> list[str]:
+    """Build normalized AI-audit log lines with a fixed header."""
+    lines = [AI_AUDIT_HEADER]
+    for index, entry in enumerate(scan_results):
+        if index >= limit:
+            break
+        lines.append(
+            " | ".join(
+                [
+                    _as_timestamp(entry.get("timestamp")),
+                    str(entry.get("port", "")),
+                    str(entry.get("remote_ip") or entry.get("ip") or ""),
+                    str(entry.get("risk_level", "")),
+                    str(entry.get("country", "")),
+                    str(entry.get("city", "")),
+                    str(entry.get("provider", "")),
+                ]
+            )
+        )
+    return lines
+
+
+def analyze_logs_with_ollama(
+    scan_results: Iterable[dict[str, Any]],
+    *,
+    context: dict[str, Any] | None = None,
+    model_name: str = "llama3.2:3b",
+    timeout_seconds: int = 120,
+) -> tuple[bool, str]:
+    """Run a local Ollama model against NetScouter logs and return analysis text."""
+    executable = shutil.which("ollama")
+    if not executable:
+        return False, "Ollama CLI was not found in PATH."
+
+    runtime_context = context or resolve_local_network_context()
+    system_prompt_a = build_analyst_prompt()
+    system_prompt_b = build_network_engine_prompt(runtime_context)
+    rag_lines = build_rag_lines(scan_results)
+    prompt = "\n".join(
+        [
+            "SYSTEM PROMPT A:",
+            system_prompt_a,
+            "",
+            "SYSTEM PROMPT B:",
+            system_prompt_b,
+            "",
+            "NETWORK LOGS:",
+            *rag_lines,
+            "",
+            "Provide concise findings, suspicious IPs, and recommended firewall actions.",
+        ]
+    )
+
+    try:
+        proc = subprocess.run(
+            [executable, "run", model_name, prompt],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"Ollama analysis timed out after {timeout_seconds} seconds."
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Ollama analysis failed to start: {exc}"
+
+    output = (proc.stdout or "").strip()
+    if proc.returncode != 0:
+        err = (proc.stderr or output or "unknown error").strip()
+        return False, f"Ollama analysis failed: {err}"
+    if not output:
+        return False, "Ollama returned empty output."
+    return True, output
+
+
 def export_session_to_xlsx(
     scan_results: Iterable[dict[str, Any]],
     output_path: str | Path,

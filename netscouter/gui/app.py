@@ -18,6 +18,7 @@ import customtkinter as ctk
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from netscouter.export import (
+    analyze_logs_with_ollama,
     append_scan_result,
     build_analyst_prompt,
     build_network_engine_prompt,
@@ -78,7 +79,7 @@ class NetScouterApp(ctk.CTk):
         self.active_scan_id = 0
         self.log_line_count = 0
 
-        self.target_var = ctk.StringVar(value="scanme.nmap.org")
+        self.target_var = ctk.StringVar(value="127.0.0.1")
         self.port_range_var = ctk.StringVar(value="20-1024")
         self.schedule_hours_var = ctk.StringVar(value="6")
         self.firewall_status_var = ctk.StringVar(value="Not queried")
@@ -187,12 +188,12 @@ class NetScouterApp(ctk.CTk):
 
         self.theme_switch = ctk.CTkSegmentedButton(
             self.ops_row,
-            values=["🌙 Lights Off", "☀️ Lights On"],
+            values=["🌙", "☀️"],
             command=self._switch_theme,
             corner_radius=10,
             width=170,
         )
-        self.theme_switch.set("🌙 Lights Off")
+        self.theme_switch.set("🌙")
         self.theme_switch.grid(row=0, column=6, padx=(10, 6), pady=8)
 
         ctk.CTkLabel(self.ops_row, text="Firewall:").grid(row=0, column=7, padx=(10, 4), pady=8)
@@ -269,31 +270,63 @@ class NetScouterApp(ctk.CTk):
     def _build_console(self) -> None:
         self.console_card = ctk.CTkFrame(self, corner_radius=10)
         self.console_card.grid(row=2, column=0, sticky="nsew", padx=16, pady=(8, 16))
-        self.console_card.grid_rowconfigure(1, weight=1)
+        self.console_card.grid_rowconfigure(0, weight=1)
         self.console_card.grid_columnconfigure(0, weight=1)
 
-        header_row = ctk.CTkFrame(self.console_card, corner_radius=10)
-        header_row.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
+        self.bottom_tabs = ctk.CTkTabview(self.console_card, corner_radius=10)
+        self.bottom_tabs.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        self.bottom_tabs.add("Scanner")
+        self.bottom_tabs.add("AI")
 
-        ctk.CTkLabel(header_row, text="Console Logs").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        scanner_tab = self.bottom_tabs.tab("Scanner")
+        scanner_tab.grid_columnconfigure(0, weight=1)
+        scanner_tab.grid_rowconfigure(1, weight=1)
+
+        scanner_header = ctk.CTkFrame(scanner_tab, corner_radius=10)
+        scanner_header.grid(row=0, column=0, sticky="ew", padx=0, pady=(0, 6))
+        ctk.CTkLabel(scanner_header, text="Console Logs").grid(row=0, column=0, sticky="w", padx=6, pady=6)
         ctk.CTkButton(
-            header_row,
+            scanner_header,
             text="Export AI Audit",
             corner_radius=10,
             command=self.export_ai_audit,
             width=120,
         ).grid(row=0, column=1, padx=6, pady=6)
-
         ctk.CTkButton(
-            header_row,
+            scanner_header,
             text="Export XLSX",
             corner_radius=10,
             command=self.export_xlsx,
             width=110,
         ).grid(row=0, column=2, padx=6, pady=6)
 
-        self.console = ctk.CTkTextbox(self.console_card, corner_radius=10)
-        self.console.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.console = ctk.CTkTextbox(scanner_tab, corner_radius=10)
+        self.console.grid(row=1, column=0, sticky="nsew", padx=0, pady=(0, 0))
+
+        ai_tab = self.bottom_tabs.tab("AI")
+        ai_tab.grid_columnconfigure(0, weight=1)
+        ai_tab.grid_rowconfigure(2, weight=1)
+
+        ai_header = ctk.CTkFrame(ai_tab, corner_radius=10)
+        ai_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ctk.CTkLabel(ai_header, text="AI Feedback from Logs").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        ctk.CTkButton(
+            ai_header,
+            text="Analyze Logs",
+            corner_radius=10,
+            command=self.analyze_logs,
+            width=120,
+        ).grid(row=0, column=1, padx=6, pady=6)
+
+        self.ai_status_var = ctk.StringVar(
+            value="Run scans, then click Analyze Logs to query llama3.2:3b via Ollama."
+        )
+        ctk.CTkLabel(ai_tab, textvariable=self.ai_status_var, anchor="w", justify="left").grid(
+            row=1, column=0, sticky="ew", pady=(0, 6)
+        )
+
+        self.ai_feedback_box = ctk.CTkTextbox(ai_tab, corner_radius=10)
+        self.ai_feedback_box.grid(row=2, column=0, sticky="nsew")
 
     def _active_theme(self) -> dict[str, str]:
         return DARK_THEME if self.current_mode == "dark" else LIGHT_THEME
@@ -339,7 +372,7 @@ class NetScouterApp(ctk.CTk):
 
     def _switch_theme(self, selected: str) -> None:
         selected_lower = selected.lower()
-        self.current_mode = "light" if "sun" in selected_lower or "lights on" in selected_lower else "dark"
+        self.current_mode = "light" if "☀" in selected_lower or "sun" in selected_lower else "dark"
         ctk.set_appearance_mode(self.current_mode)
         self._apply_theme()
         self._rerender_table()
@@ -743,6 +776,39 @@ class NetScouterApp(ctk.CTk):
 
         export_session_to_xlsx(self.scan_results, path)
         self._log(f"Exported XLSX to {path}")
+
+    def analyze_logs(self) -> None:
+        if not self.scan_results:
+            self._log("No results available for AI analysis")
+            self.ai_status_var.set("No scan data available. Run a scan first.")
+            return
+
+        self.ai_status_var.set("Checking local AI readiness...")
+        self.bottom_tabs.set("AI")
+        threading.Thread(target=self._analyze_logs_worker, daemon=True, name="ai-analyze-worker").start()
+
+    def _analyze_logs_worker(self) -> None:
+        ready = ensure_ai_readiness(console=self._log)
+        if not ready:
+            self.after(0, lambda: self.ai_status_var.set("AI readiness failed. Install/enable Ollama and llama3.2:3b."))
+            return
+
+        context = resolve_local_network_context()
+        self.after(0, lambda: self.ai_status_var.set("Running Ollama analysis..."))
+        ok, output = analyze_logs_with_ollama(self.scan_results, context=context)
+
+        def publish() -> None:
+            self.ai_feedback_box.delete("1.0", "end")
+            if ok:
+                self.ai_feedback_box.insert("1.0", output)
+                self.ai_status_var.set("AI analysis complete.")
+                self._log("AI analysis complete (see AI tab).")
+            else:
+                self.ai_feedback_box.insert("1.0", output)
+                self.ai_status_var.set("AI analysis failed.")
+                self._log(f"AI analysis failed: {output}")
+
+        self.after(0, publish)
 
     def show_charts(self) -> None:
         if not self.scan_results:

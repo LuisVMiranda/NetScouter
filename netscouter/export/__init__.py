@@ -2,8 +2,10 @@
 
 from .logging import append_scan_result
 from .reports import (
+    analyze_logs_with_ollama,
     build_analyst_prompt,
     build_network_engine_prompt,
+    build_rag_lines,
     detect_local_model,
     ensure_ai_readiness,
     export_ai_audit_report,
@@ -13,8 +15,10 @@ from .reports import (
 
 __all__ = [
     "append_scan_result",
+    "analyze_logs_with_ollama",
     "build_analyst_prompt",
     "build_network_engine_prompt",
+    "build_rag_lines",
     "detect_local_model",
     "ensure_ai_readiness",
     "export_ai_audit_report",
