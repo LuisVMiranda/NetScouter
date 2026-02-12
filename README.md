@@ -70,3 +70,14 @@ Defined in `pyproject.toml`:
 - pandas
 - apscheduler
 - matplotlib
+- scapy
+
+
+## Live packet streaming permissions
+
+NetScouter can stream packets live with Scapy. Raw packet sniffing generally requires elevated privileges:
+
+- **Linux/macOS:** run the app with `sudo`, or grant packet-capture capabilities to your Python runtime (`CAP_NET_RAW` / `CAP_NET_ADMIN`).
+- **Windows:** run the app from an Administrator shell (Npcap/WinPcap recommended for capture support).
+
+Without elevated permissions, packet stream start may fail with permission errors.
