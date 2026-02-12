@@ -25,17 +25,23 @@ from netscouter.export import (
     build_network_engine_prompt,
     ensure_ai_readiness,
     export_ai_audit_report,
-    export_iot_map,
     export_session_to_xlsx,
     resolve_local_network_context,
 )
-from netscouter.firewall.controller import banish_ip, get_firewall_status
+from netscouter.firewall.controller import (
+    add_custom_rule,
+    apply_firewall_preset,
+    banish_ip,
+    get_firewall_status,
+    panic_button,
+    remove_custom_rule,
+    toggle_firewall,
+)
 from netscouter.gui.icons import get_process_identity_label
 from netscouter.intel.geo import get_ip_intel
 from netscouter.intel.reputation import evaluate_reputation_consensus
 from netscouter.intel.packet_signals import evaluate_packet_signals
 from netscouter.scanner.engine import ScanJob, ScanResult, scan_established_connections, scan_targets
-from netscouter.scanner.lan_mapper import DeviceRegistry, correlate_iot_outbound_anomalies, discover_lan_devices
 from netscouter.scanner.packet_stream import PacketCaptureService
 
 DARK_THEME = {
@@ -100,13 +106,18 @@ class NetScouterApp(ctk.CTk):
         self.packet_alert_cache: set[str] = set()
         self.selected_remote_ip: str | None = None
         self.selected_port: int | None = None
-        self.device_registry = DeviceRegistry()
-        self.iot_anomalies: list[dict[str, str | int]] = []
 
         self.target_var = ctk.StringVar(value="127.0.0.1")
         self.port_range_var = ctk.StringVar(value="20-1024")
         self.schedule_hours_var = ctk.StringVar(value="6")
         self.firewall_status_var = ctk.StringVar(value="Not queried")
+        self.firewall_rule_name_var = ctk.StringVar(value="NetScouter Custom Rule")
+        self.firewall_rule_port_var = ctk.StringVar(value="")
+        self.firewall_rule_ip_var = ctk.StringVar(value="")
+        self.firewall_direction_var = ctk.StringVar(value="in")
+        self.firewall_action_var = ctk.StringVar(value="block")
+        self.firewall_protocol_var = ctk.StringVar(value="tcp")
+        self.firewall_preset_var = ctk.StringVar(value="normal")
 
         self.status_filter_var = ctk.StringVar(value="All Status")
         self.risk_filter_var = ctk.StringVar(value="All Risk")
@@ -413,6 +424,7 @@ class NetScouterApp(ctk.CTk):
         self.bottom_tabs.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         self.bottom_tabs.add("Scanner")
         self.bottom_tabs.add("AI")
+        self.bottom_tabs.add("Firewall")
 
         scanner_tab = self.bottom_tabs.tab("Scanner")
         scanner_tab.grid_columnconfigure(0, weight=1)
@@ -464,127 +476,38 @@ class NetScouterApp(ctk.CTk):
         self.ai_feedback_box = ctk.CTkTextbox(ai_tab, corner_radius=10)
         self.ai_feedback_box.grid(row=2, column=0, sticky="nsew")
 
-        self.bottom_tabs.add("IoT Map")
-        iot_tab = self.bottom_tabs.tab("IoT Map")
-        iot_tab.grid_columnconfigure(0, weight=1)
-        iot_tab.grid_rowconfigure(1, weight=1)
-        iot_tab.grid_rowconfigure(3, weight=1)
+        firewall_tab = self.bottom_tabs.tab("Firewall")
+        firewall_tab.grid_columnconfigure(0, weight=1)
 
-        iot_header = ctk.CTkFrame(iot_tab, corner_radius=10)
-        iot_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        ctk.CTkLabel(iot_header, text="IoT inventory and outbound anomaly correlation").grid(row=0, column=0, sticky="w", padx=6, pady=6)
-        ctk.CTkButton(iot_header, text="Discover IoT", width=110, command=self.start_iot_discovery).grid(row=0, column=1, padx=6, pady=6)
-        ctk.CTkButton(iot_header, text="Export IoT Map", width=120, command=self.export_iot_map_data).grid(row=0, column=2, padx=6, pady=6)
-
-        self.iot_inventory_table = ttk.Treeview(
-            iot_tab,
-            columns=("ip", "mac", "hostname", "vendor", "device_type", "first_seen", "last_seen"),
-            show="headings",
-            height=6,
+        firewall_header = ctk.CTkLabel(
+            firewall_tab,
+            text="Use confirmations before risky actions. Rollback hint: restore preset to Normal and remove temporary rules.",
+            justify="left",
+            anchor="w",
         )
-        for name, label, width in (
-            ("ip", "IP", 130),
-            ("mac", "MAC", 140),
-            ("hostname", "Hostname", 170),
-            ("vendor", "Vendor", 170),
-            ("device_type", "Type", 90),
-            ("first_seen", "First Seen", 180),
-            ("last_seen", "Last Seen", 180),
-        ):
-            self.iot_inventory_table.heading(name, text=label)
-            self.iot_inventory_table.column(name, width=width, anchor="center")
-        self.iot_inventory_table.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
+        firewall_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
-        ctk.CTkLabel(iot_tab, text="Suspicious outbound links from IoT devices").grid(row=2, column=0, sticky="w", pady=(0, 4))
-        self.iot_anomaly_table = ttk.Treeview(
-            iot_tab,
-            columns=("device_ip", "device_hostname", "remote_ip", "country", "provider", "risk", "reason"),
-            show="headings",
-            height=6,
-        )
-        for name, label, width in (
-            ("device_ip", "Device IP", 120),
-            ("device_hostname", "Hostname", 150),
-            ("remote_ip", "Remote IP", 130),
-            ("country", "Country", 110),
-            ("provider", "Provider", 170),
-            ("risk", "Risk", 90),
-            ("reason", "Reason", 320),
-        ):
-            self.iot_anomaly_table.heading(name, text=label)
-            self.iot_anomaly_table.column(name, width=width, anchor="center")
-        self.iot_anomaly_table.grid(row=3, column=0, sticky="nsew")
+        actions_row = ctk.CTkFrame(firewall_tab, corner_radius=10)
+        actions_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
 
-    def start_iot_discovery(self) -> None:
-        threading.Thread(target=self._start_iot_discovery_worker, daemon=True, name="iot-discovery-worker").start()
+        ctk.CTkButton(actions_row, text="Refresh Status", command=self.refresh_firewall_insight, width=130).grid(row=0, column=0, padx=6, pady=6)
+        ctk.CTkButton(actions_row, text="Toggle ON", command=lambda: self.toggle_firewall_from_ui(True), width=110).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkButton(actions_row, text="Toggle OFF", command=lambda: self.toggle_firewall_from_ui(False), width=110).grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkOptionMenu(actions_row, values=["soft", "normal", "paranoid"], variable=self.firewall_preset_var, width=120).grid(row=0, column=3, padx=6, pady=6)
+        ctk.CTkButton(actions_row, text="Apply Preset", command=self.apply_firewall_preset_from_ui, width=130).grid(row=0, column=4, padx=6, pady=6)
+        ctk.CTkButton(actions_row, text="Panic Button", command=self.run_panic_button, fg_color="#DC2626", hover_color="#B91C1C", width=120).grid(row=0, column=5, padx=6, pady=6)
 
-    def _start_iot_discovery_worker(self) -> None:
-        self.after(0, lambda: self._log("IoT map: running LAN discovery"))
-        try:
-            discovered = discover_lan_devices()
-        except Exception as exc:  # noqa: BLE001
-            self.after(0, lambda: self._log(f"IoT discovery failed: {exc}"))
-            return
+        rule_row = ctk.CTkFrame(firewall_tab, corner_radius=10)
+        rule_row.grid(row=2, column=0, sticky="ew", pady=(0, 8))
 
-        for device in discovered:
-            self.device_registry.upsert(
-                ip=str(device.get("ip", "")),
-                mac=str(device.get("mac", "")),
-                hostname=str(device.get("hostname", "Unknown")),
-                vendor=str(device.get("vendor", "Unknown")),
-                device_type=str(device.get("device_type", "unknown")),
-            )
-
-        self.iot_anomalies = correlate_iot_outbound_anomalies(self.device_registry)
-        self.after(0, self._refresh_iot_tables)
-        self.after(0, lambda: self._log(f"IoT discovery complete: {len(self.device_registry.devices)} devices, {len(self.iot_anomalies)} anomalies"))
-
-    def _refresh_iot_tables(self) -> None:
-        for table in (self.iot_inventory_table, self.iot_anomaly_table):
-            for item in table.get_children():
-                table.delete(item)
-
-        for device in self.device_registry.devices:
-            self.iot_inventory_table.insert(
-                "",
-                "end",
-                values=(
-                    device.get("ip", ""),
-                    device.get("mac", ""),
-                    device.get("hostname", "Unknown"),
-                    device.get("vendor", "Unknown"),
-                    str(device.get("device_type", "unknown")).upper(),
-                    device.get("first_seen", ""),
-                    device.get("last_seen", ""),
-                ),
-            )
-
-        for anomaly in self.iot_anomalies:
-            self.iot_anomaly_table.insert(
-                "",
-                "end",
-                values=(
-                    anomaly.get("device_ip", ""),
-                    anomaly.get("device_hostname", "Unknown"),
-                    anomaly.get("remote_ip", ""),
-                    anomaly.get("country", "Unknown"),
-                    anomaly.get("provider", "Unknown"),
-                    str(anomaly.get("risk", "average")).capitalize(),
-                    anomaly.get("reason", ""),
-                ),
-            )
-
-    def export_iot_map_data(self) -> None:
-        if not self.device_registry.devices:
-            self._log("No IoT inventory to export")
-            return
-
-        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
-        if not path:
-            return
-
-        export_iot_map(self.device_registry.devices, self.iot_anomalies, path)
-        self._log(f"Exported IoT map to {path}")
+        ctk.CTkEntry(rule_row, textvariable=self.firewall_rule_name_var, width=180, placeholder_text="Rule name").grid(row=0, column=0, padx=6, pady=6)
+        ctk.CTkOptionMenu(rule_row, values=["in", "out"], variable=self.firewall_direction_var, width=90).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkOptionMenu(rule_row, values=["allow", "block"], variable=self.firewall_action_var, width=100).grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkOptionMenu(rule_row, values=["tcp", "udp"], variable=self.firewall_protocol_var, width=90).grid(row=0, column=3, padx=6, pady=6)
+        ctk.CTkEntry(rule_row, textvariable=self.firewall_rule_port_var, width=100, placeholder_text="Port").grid(row=0, column=4, padx=6, pady=6)
+        ctk.CTkEntry(rule_row, textvariable=self.firewall_rule_ip_var, width=150, placeholder_text="Remote IP (optional)").grid(row=0, column=5, padx=6, pady=6)
+        ctk.CTkButton(rule_row, text="Add Rule", command=self.add_custom_rule_from_ui, width=100).grid(row=0, column=6, padx=6, pady=6)
+        ctk.CTkButton(rule_row, text="Remove Rule", command=self.remove_custom_rule_from_ui, width=120).grid(row=0, column=7, padx=6, pady=6)
 
     def _active_theme(self) -> dict[str, str]:
         return DARK_THEME if self.current_mode == "dark" else LIGHT_THEME
@@ -1080,6 +1003,116 @@ class NetScouterApp(ctk.CTk):
     def refresh_firewall_insight(self) -> None:
         threading.Thread(target=self._refresh_firewall_worker, daemon=True, name="firewall-insight").start()
 
+    def toggle_firewall_from_ui(self, enabled: bool) -> None:
+        action = "enable" if enabled else "disable"
+        confirm = messagebox.askyesno("Confirm Firewall Toggle", f"Do you want to {action} the firewall?")
+        if not confirm:
+            self._log(f"Firewall toggle cancelled ({action}).")
+            return
+        threading.Thread(target=self._toggle_firewall_worker, args=(enabled,), daemon=True, name="firewall-toggle").start()
+
+    def _toggle_firewall_worker(self, enabled: bool) -> None:
+        result = toggle_firewall(enabled, confirmed=True, safe_mode=True)
+        self.after(0, lambda: self._log_operation_result("toggle_firewall", result))
+
+    def apply_firewall_preset_from_ui(self) -> None:
+        preset = self.firewall_preset_var.get().strip().lower()
+        confirm = messagebox.askyesno(
+            "Apply Firewall Preset",
+            f"Apply '{preset}' preset? Rollback hint: switch to 'normal' preset if needed.",
+        )
+        if not confirm:
+            self._log(f"Firewall preset cancelled ({preset}).")
+            return
+        threading.Thread(target=self._apply_preset_worker, args=(preset,), daemon=True, name="firewall-preset").start()
+
+    def _apply_preset_worker(self, preset: str) -> None:
+        result = apply_firewall_preset(preset)
+        self.after(0, lambda: self._log_operation_result("apply_firewall_preset", result))
+
+    def add_custom_rule_from_ui(self) -> None:
+        rule_name = self.firewall_rule_name_var.get().strip()
+        if not rule_name:
+            self._log("Firewall custom rule: name is required.")
+            return
+
+        port_text = self.firewall_rule_port_var.get().strip()
+        port: int | None = None
+        if port_text:
+            try:
+                port = int(port_text)
+            except ValueError:
+                self._log("Firewall custom rule: port must be an integer.")
+                return
+
+        threading.Thread(
+            target=self._add_custom_rule_worker,
+            args=(rule_name, port, self.firewall_rule_ip_var.get().strip() or None),
+            daemon=True,
+            name="firewall-add-rule",
+        ).start()
+
+    def _add_custom_rule_worker(self, rule_name: str, port: int | None, remote_ip: str | None) -> None:
+        result = add_custom_rule(
+            name=rule_name,
+            direction=self.firewall_direction_var.get(),
+            action=self.firewall_action_var.get(),
+            protocol=self.firewall_protocol_var.get(),
+            port=port,
+            remote_ip=remote_ip,
+        )
+        self.after(0, lambda: self._log_operation_result("add_custom_rule", result))
+
+    def remove_custom_rule_from_ui(self) -> None:
+        rule_name = self.firewall_rule_name_var.get().strip()
+        if not rule_name:
+            self._log("Firewall custom rule removal: name is required.")
+            return
+
+        confirm = messagebox.askyesno(
+            "Remove Firewall Rule",
+            f"Remove firewall rule '{rule_name}'? Rollback hint: re-add with the same name and settings.",
+        )
+        if not confirm:
+            self._log(f"Firewall custom rule removal cancelled ({rule_name}).")
+            return
+        threading.Thread(target=self._remove_custom_rule_worker, args=(rule_name,), daemon=True, name="firewall-remove-rule").start()
+
+    def _remove_custom_rule_worker(self, rule_name: str) -> None:
+        result = remove_custom_rule(rule_name)
+        self.after(0, lambda: self._log_operation_result("remove_custom_rule", result))
+
+    def run_panic_button(self) -> None:
+        confirm = messagebox.askyesno(
+            "Panic Button",
+            "Run emergency firewall lockdown sequence now? This may disrupt current connections.",
+        )
+        if not confirm:
+            self._log("Panic button cancelled.")
+            return
+        threading.Thread(target=self._panic_button_worker, daemon=True, name="firewall-panic").start()
+
+    def _panic_button_worker(self) -> None:
+        result = panic_button()
+        self.after(0, lambda: self._log_operation_result("panic_button", result))
+
+    def _log_operation_result(self, operation: str, result: dict[str, object]) -> None:
+        message = str(result.get("message", result))
+        status = "SUCCESS" if bool(result.get("success")) else "FAIL"
+        self._log(f"Firewall {operation} [{status}]: {message}")
+
+        steps = result.get("steps")
+        if isinstance(steps, list):
+            for idx, step in enumerate(steps, start=1):
+                if not isinstance(step, dict):
+                    self._log(f"  step-{idx}: {step}")
+                    continue
+                step_name = str(step.get("step", f"step-{idx}"))
+                step_ok = "SUCCESS" if bool(step.get("success")) else "FAIL"
+                self._log(f"  {step_name} [{step_ok}]: {step}")
+
+        self.after(0, self.refresh_firewall_insight)
+
     def _refresh_firewall_worker(self) -> None:
         try:
             result = get_firewall_status()
@@ -1087,9 +1120,15 @@ class NetScouterApp(ctk.CTk):
             self.after(0, lambda: self._log(f"Firewall insight failed: {exc}"))
             return
 
-        status_text = result.get("message") or result.get("stdout") or str(result)
+        if result.get("success"):
+            status_text = (
+                f"enabled={result.get('enabled')} | rules={result.get('active_rules_count')} | "
+                f"in={result.get('default_inbound_action')} / out={result.get('default_outbound_action')}"
+            )
+        else:
+            status_text = str(result.get("message") or result)
         self.after(0, lambda: self.firewall_status_var.set(status_text[:90]))
-        self.after(0, lambda: self._log(f"Firewall insight: {status_text}"))
+        self.after(0, lambda: self._log(f"Firewall insight: {result}"))
 
     def banish_selected_ip(self) -> None:
         selection = self.results_table.selection()
