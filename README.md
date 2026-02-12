@@ -2,21 +2,50 @@
 
 NetScouter is a Python desktop app scaffold for network scanning, intel enrichment, firewall integration, exports, and scheduled scans.
 
-## Project layout
+## Updated architecture
 
 ```text
 netscouter/
   __init__.py
   main.py
   gui/
+    app.py              # Sidebar shell + workspace panes (Dashboard/Intel/Firewall/AI/Ops)
   scanner/
   intel/
   firewall/
+  alerts/
+    voice.py            # Voice alerts with pluggable TTS backends + severity thresholds
+    remote.py           # Remote /BLOCK channel + secure command authorization
   export/
   scheduler/
 pyproject.toml
 README.md
+assets/screenshots/
 ```
+
+### GUI redesign summary
+
+- `NetScouterApp` now uses a **left vertical sidebar** to switch between five panes:
+  - Dashboard
+  - Intelligence
+  - Firewall
+  - AI Auditor
+  - Ops/Schedule
+- The right side is now a single workspace frame that swaps pane content.
+- Existing monolithic UI builders were split into per-pane builders for cleaner maintenance.
+
+### Alerting and remote response
+
+- `netscouter.alerts.voice.VoiceAlertService`
+  - Accepts any backend implementing `speak(text)`.
+  - Enforces severity thresholds (`INFO`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`).
+- `netscouter.alerts.remote.RemoteActionChannel`
+  - Supports mobile-triggered command flows such as `/BLOCK <ip>`.
+  - Includes shared-secret HMAC signatures, sender allowlist, timestamp windows, and nonce replay protection.
+
+## Redesigned layout asset
+
+![NetScouter redesigned workspace](assets/screenshots/redesign-layout.svg)
 
 ## Prerequisites
 
@@ -72,6 +101,16 @@ Defined in `pyproject.toml`:
 - matplotlib
 - scapy
 
+### Live packet stream quick usage
+
+1. Run a scan in **Dashboard** and click a row, or set a target IP manually.
+2. Click **Start Live Packet Stream**.
+3. Read updates in the packet detail panel (double-click a row for full report).
+4. Use **Export packet slice** for JSON evidence capture.
+
+If the stream does not start, run with elevated privileges and ensure packet-capture drivers are present:
+- Windows: run shell as Administrator and install Npcap.
+- Linux/macOS: run with sudo or grant packet capabilities.
 
 ## Live packet streaming permissions
 
@@ -81,27 +120,3 @@ NetScouter can stream packets live with Scapy. Raw packet sniffing generally req
 - **Windows:** run the app from an Administrator shell (Npcap/WinPcap recommended for capture support).
 
 Without elevated permissions, packet stream start may fail with permission errors.
-
-## Reputation intelligence configuration
-
-NetScouter can enrich each scanned IP using AbuseIPDB, VirusTotal, and AlienVault OTX. Configure API keys with environment variables (or in-app settings panel and click **Apply Settings**):
-
-- `ABUSEIPDB_API_KEY`
-- `VIRUSTOTAL_API_KEY` (or `VT_API_KEY`)
-- `OTX_API_KEY`
-
-Consensus scoring is displayed per row as `flagged/3`. Auto-blocking only runs when:
-
-1. **Auto-block by consensus** is enabled in settings.
-2. The configured threshold is met (default `3`).
-3. Firewall action executes successfully.
-
-## IoT Map and anomaly detection
-
-The dashboard includes an **IoT Map** tab that can:
-
-- Discover LAN assets with a ping + ARP sweep.
-- Build an in-memory inventory keyed by MAC/IP with `device_type`, `first_seen`, and `last_seen`.
-- Correlate established outbound flows from IoT-class devices to external destinations.
-- Flag suspicious country/provider/port behavior via IoT-specific risk rules.
-- Export inventory and anomalies to JSON.
