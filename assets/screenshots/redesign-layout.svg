@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="780" viewBox="0 0 1320 780">
+  <rect width="1320" height="780" fill="#0b0e14"/>
+  <rect x="24" y="24" width="240" height="732" rx="14" fill="#1f2937"/>
+  <text x="48" y="76" fill="#e2e8f0" font-size="36" font-family="Arial" font-weight="700">NetScouter</text>
+
+  <g font-family="Arial" font-size="24" fill="#e5e7eb">
+    <rect x="44" y="110" width="200" height="54" rx="10" fill="#1e3a8a"/>
+    <text x="62" y="145">Dashboard</text>
+
+    <rect x="44" y="178" width="200" height="54" rx="10" fill="#374151"/>
+    <text x="62" y="213">Intelligence</text>
+
+    <rect x="44" y="246" width="200" height="54" rx="10" fill="#374151"/>
+    <text x="62" y="281">Firewall</text>
+
+    <rect x="44" y="314" width="200" height="54" rx="10" fill="#374151"/>
+    <text x="62" y="349">AI Auditor</text>
+
+    <rect x="44" y="382" width="200" height="54" rx="10" fill="#374151"/>
+    <text x="62" y="417">Ops/Schedule</text>
+  </g>
+
+  <rect x="282" y="24" width="1014" height="732" rx="14" fill="#1f2937"/>
+  <rect x="304" y="46" width="970" height="120" rx="10" fill="#111827"/>
+  <text x="336" y="116" fill="#bfdbfe" font-size="30" font-family="Arial">Dashboard controls (Target / Port Range / Scan actions)</text>
+
+  <rect x="304" y="182" width="970" height="80" rx="10" fill="#111827"/>
+  <text x="336" y="232" fill="#bfdbfe" font-size="28" font-family="Arial">Filters + Packet stream controls</text>
+
+  <rect x="304" y="278" width="970" height="300" rx="10" fill="#0f172a"/>
+  <text x="336" y="330" fill="#93c5fd" font-size="30" font-family="Arial">Results table workspace</text>
+
+  <rect x="304" y="594" width="970" height="140" rx="10" fill="#111827"/>
+  <text x="336" y="666" fill="#93c5fd" font-size="30" font-family="Arial">Packet detail panel</text>
+</svg>
