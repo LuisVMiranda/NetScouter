@@ -13,7 +13,8 @@ dependencies = [
   "psutil>=5.9.0",
   "requests>=2.31.0",
   "pandas>=2.2.0",
-  "apscheduler>=3.10.4"
+  "apscheduler>=3.10.4",
+  "matplotlib>=3.8.0"
 ]
 
 [tool.setuptools.packages.find]
