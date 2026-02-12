@@ -25,6 +25,11 @@ class ScanResult:
     is_open: bool
     source: str = "probe"
     error: str | None = None
+    local_port: int | None = None
+    pid: int | None = None
+    process_name: str | None = None
+    exe_path: str | None = None
+    cmdline: str | None = None
 
 
 @dataclass(slots=True)
@@ -57,27 +62,60 @@ def _probe_tcp_port(host: str, port: int, timeout: float) -> ScanResult:
         return ScanResult(host=host, port=port, is_open=False, error=str(exc))
 
 
-def collect_established_connections() -> list[tuple[str, int]]:
-    """Collect remote endpoints from established inet connections."""
+def _normalize_host_port(address: object | None) -> tuple[str | None, int | None]:
+    if not address:
+        return None, None
+
+    if isinstance(address, tuple):
+        if len(address) >= 2:
+            return str(address[0]), int(address[1])
+        return None, None
+
+    return getattr(address, "ip", None), getattr(address, "port", None)
+
+
+def _safe_process_details(pid: int | None) -> dict[str, str | int | None]:
+    details: dict[str, str | int | None] = {
+        "pid": pid,
+        "process_name": "Unknown",
+        "exe_path": "",
+        "cmdline": "",
+    }
+    if not pid:
+        return details
+
+    try:
+        process = psutil.Process(pid)
+        details["process_name"] = process.name()
+        details["exe_path"] = process.exe() or ""
+        details["cmdline"] = " ".join(process.cmdline())
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        pass
+    return details
+
+
+def collect_established_connections() -> tuple[list[tuple[str, int]], dict[str, dict[str, str | int | None]]]:
+    """Collect remote endpoints from established inet connections plus process context."""
     endpoints: list[tuple[str, int]] = []
+    ip_to_process: dict[str, dict[str, str | int | None]] = {}
+    local_port_to_process: dict[int, dict[str, str | int | None]] = {}
+
     for conn in psutil.net_connections(kind="inet"):
+        _, local_port = _normalize_host_port(conn.laddr)
+        if local_port and local_port not in local_port_to_process:
+            local_port_to_process[local_port] = _safe_process_details(conn.pid)
+
         if conn.status != "ESTABLISHED" or not conn.raddr:
             continue
 
-        remote_ip: str | None = None
-        remote_port: int | None = None
-        if isinstance(conn.raddr, tuple):
-            if len(conn.raddr) >= 2:
-                remote_ip = conn.raddr[0]
-                remote_port = conn.raddr[1]
-        else:
-            remote_ip = getattr(conn.raddr, "ip", None)
-            remote_port = getattr(conn.raddr, "port", None)
+        remote_ip, remote_port = _normalize_host_port(conn.raddr)
 
         if remote_ip and remote_port:
             endpoints.append((remote_ip, int(remote_port)))
+            process_details = local_port_to_process.get(int(local_port or 0)) or _safe_process_details(conn.pid)
+            ip_to_process.setdefault(remote_ip, process_details)
 
-    return endpoints
+    return endpoints, ip_to_process
 
 
 def _callback_consumer(
@@ -108,6 +146,7 @@ def scan_targets(
     on_complete: Callable[[], None] | None = None,
     max_workers: int = 128,
     timeout: float = 0.6,
+    target_process_map: dict[str, dict[str, str | int | None]] | None = None,
 ) -> ScanJob:
     """Scan host/port combinations asynchronously and stream results via callback."""
 
@@ -137,9 +176,19 @@ def scan_targets(
                         break
 
                     future = pool.submit(_probe_tcp_port, target, int(port), timeout)
-                    future.add_done_callback(
-                        lambda fut: result_queue.put(fut.result()) if not stop_event.is_set() else None
-                    )
+                    def _queue_result(fut, target_host: str = target) -> None:  # type: ignore[no-untyped-def]
+                        if stop_event.is_set():
+                            return
+                        result = fut.result()
+                        if target_process_map:
+                            process_meta = target_process_map.get(target_host, {})
+                            result.pid = int(process_meta.get("pid")) if process_meta.get("pid") else None
+                            result.process_name = str(process_meta.get("process_name", "Unknown"))
+                            result.exe_path = str(process_meta.get("exe_path", ""))
+                            result.cmdline = str(process_meta.get("cmdline", ""))
+                        result_queue.put(result)
+
+                    future.add_done_callback(_queue_result)
                     futures.append(future)
 
             for future in futures:
@@ -166,7 +215,8 @@ def scan_established_connections(
     timeout: float = 0.6,
 ) -> ScanJob:
     """Convenience wrapper: scan remotes discovered from ESTABLISHED sockets."""
-    targets = sorted({ip for ip, _ in collect_established_connections()})
+    endpoints, process_map = collect_established_connections()
+    targets = sorted({ip for ip, _ in endpoints})
     return scan_targets(
         targets=targets,
         ports=list(ports),
@@ -174,4 +224,5 @@ def scan_established_connections(
         on_complete=on_complete,
         max_workers=max_workers,
         timeout=timeout,
+        target_process_map=process_map,
     )

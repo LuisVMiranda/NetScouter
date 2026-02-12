@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import importlib.util
 import os
+import platform
 import queue
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ from netscouter.export import (
     resolve_local_network_context,
 )
 from netscouter.firewall.controller import banish_ip, get_firewall_status
+from netscouter.gui.icons import get_process_identity_label
 from netscouter.intel.geo import get_ip_intel
 from netscouter.intel.packet_signals import evaluate_packet_signals
 from netscouter.scanner.engine import ScanJob, ScanResult, scan_established_connections, scan_targets
@@ -57,6 +59,16 @@ RISK_COLORS = {
 QUEUE_BATCH_LIMIT = 120
 MAX_LOG_LINES = 2000
 PACKET_SLICE_LIMIT = 120
+SUSPICIOUS_PROCESS_NAMES = {
+    "svchost.exe",
+    "lsass.exe",
+    "explorer.exe",
+    "services.exe",
+    "winlogon.exe",
+    "csrss.exe",
+    "systemd",
+    "kthreadd",
+}
 
 
 class NetScouterApp(ctk.CTk):
@@ -74,8 +86,8 @@ class NetScouterApp(ctk.CTk):
         self.scheduled_job_id = "recurring_scan"
 
         self.scan_job: ScanJob | None = None
-        self.scan_results: list[dict[str, str | int]] = []
-        self.ui_queue: queue.Queue[dict[str, str | int]] = queue.Queue()
+        self.scan_results: list[dict[str, str | int | list[str]]] = []
+        self.ui_queue: queue.Queue[dict[str, str | int | list[str]]] = queue.Queue()
         self.intel_executor = ThreadPoolExecutor(max_workers=12, thread_name_prefix="intel")
         self.scan_guard = threading.Lock()
         self.is_scan_running = False
@@ -280,18 +292,31 @@ class NetScouterApp(ctk.CTk):
         self.filter_summary_var = ctk.StringVar(value="Showing 0 / 0 rows")
         ctk.CTkLabel(self.filter_row, textvariable=self.filter_summary_var).grid(row=0, column=8, padx=8, pady=8, sticky="e")
 
-        columns = ("port", "status", "remote_ip", "location", "provider", "risk")
+        columns = ("port", "status", "remote_ip", "process", "exe_path", "location", "provider", "risk", "alerts")
         self.results_table = ttk.Treeview(self.table_card, columns=columns, show="headings", selectmode="browse")
 
         headings = {
             "port": "Port",
             "status": "Status",
             "remote_ip": "Remote IP",
+            "process": "Process",
+            "exe_path": "Executable Path",
             "location": "Location",
             "provider": "Provider",
             "risk": "Risk",
+            "alerts": "Alerts",
         }
-        widths = {"port": 80, "status": 90, "remote_ip": 175, "location": 200, "provider": 250, "risk": 80}
+        widths = {
+            "port": 80,
+            "status": 90,
+            "remote_ip": 170,
+            "process": 180,
+            "exe_path": 300,
+            "location": 160,
+            "provider": 170,
+            "risk": 80,
+            "alerts": 200,
+        }
 
         for name in columns:
             self.results_table.heading(name, text=headings[name])
@@ -508,6 +533,27 @@ class NetScouterApp(ctk.CTk):
         self._set_scan_running(False)
         self._log(message)
 
+    def _trusted_system_roots(self) -> tuple[str, ...]:
+        if platform.system().lower() == "windows":
+            roots = [
+                os.environ.get("SystemRoot", r"C:\\Windows"),
+                os.environ.get("ProgramFiles", r"C:\\Program Files"),
+                os.environ.get("ProgramFiles(x86)", r"C:\\Program Files (x86)"),
+            ]
+            return tuple(root.lower() for root in roots if root)
+        return ("/usr/bin", "/usr/sbin", "/bin", "/sbin")
+
+    def _detect_process_warnings(self, process_name: str, exe_path: str) -> list[str]:
+        warnings: list[str] = []
+        normalized_name = process_name.strip().lower()
+        normalized_path = exe_path.strip().lower()
+
+        if normalized_name in SUSPICIOUS_PROCESS_NAMES and normalized_path:
+            trusted_roots = self._trusted_system_roots()
+            if not any(normalized_path.startswith(root) for root in trusted_roots):
+                warnings.append("⚠️ Masquerading path")
+        return warnings
+
     def _enrich_and_queue(self, scan_result: ScanResult, scan_id: int) -> None:
         location = "Unknown"
         provider = "Unknown"
@@ -525,6 +571,15 @@ class NetScouterApp(ctk.CTk):
         except Exception as exc:  # noqa: BLE001
             provider = f"Lookup error: {exc}"
 
+        process_name = str(scan_result.process_name or "Unknown")
+        exe_path = str(scan_result.exe_path or "")
+        pid = int(scan_result.pid) if scan_result.pid is not None else ""
+        cmdline = str(scan_result.cmdline or "")
+        process_label = get_process_identity_label(process_name, exe_path)
+        warnings = self._detect_process_warnings(process_name, exe_path)
+        if warnings and risk_level != "high":
+            risk_level = "high"
+
         payload = {
             "scan_id": scan_id,
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -537,10 +592,17 @@ class NetScouterApp(ctk.CTk):
             "provider": provider,
             "risk_level": risk_level,
             "risk": risk_level.capitalize(),
+            "pid": pid,
+            "process_name": process_name,
+            "process_label": process_label,
+            "exe_path": exe_path,
+            "cmdline": cmdline,
+            "warnings": warnings,
+            "alerts": " ".join(warnings) if warnings else "—",
         }
         self.ui_queue.put(payload)
 
-    def _passes_filters(self, row: dict[str, str | int]) -> bool:
+    def _passes_filters(self, row: dict[str, str | int | list[str]]) -> bool:
         selected_status = self.status_filter_var.get()
         selected_risk = self.risk_filter_var.get()
 
@@ -565,9 +627,12 @@ class NetScouterApp(ctk.CTk):
                     payload["port"],
                     payload["status"],
                     payload["remote_ip"],
+                    payload["process_label"],
+                    payload["exe_path"],
                     payload["location"],
                     payload["provider"],
                     payload["risk"],
+                    payload["alerts"],
                 ),
                 tags=(stripe_tag, risk_tag),
             )
@@ -717,9 +782,12 @@ class NetScouterApp(ctk.CTk):
                         payload["port"],
                         payload["status"],
                         payload["remote_ip"],
+                        payload["process_label"],
+                        payload["exe_path"],
                         payload["location"],
                         payload["provider"],
                         payload["risk"],
+                        payload["alerts"],
                     ),
                     tags=(stripe_tag, risk_tag),
                 )
