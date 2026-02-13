@@ -130,15 +130,23 @@ class PacketCaptureService:
 
 
     def _resolve_capture_interface(self, remote_ip: str) -> str | None:
-        if self._mode == "local_network":
-            ipv4 = self._detect_local_ipv4()
-            if ipv4:
-                for iface, addrs in psutil.net_if_addrs().items():
-                    for addr in addrs:
-                        if getattr(addr, "family", None) == socket.AF_INET and getattr(addr, "address", "") == ipv4:
-                            return iface
-            return None
+        target_ip = self._detect_local_ipv4() if self._mode == "local_network" else self._detect_route_local_ip(remote_ip)
+        if target_ip:
+            for iface, addrs in psutil.net_if_addrs().items():
+                for addr in addrs:
+                    if getattr(addr, "family", None) == socket.AF_INET and getattr(addr, "address", "") == target_ip:
+                        return iface
         return None
+
+    def _detect_route_local_ip(self, remote_ip: str) -> str | None:
+        fallback = "8.8.8.8"
+        candidate = remote_ip if remote_ip and ":" not in remote_ip else fallback
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect((candidate, 80))
+                return sock.getsockname()[0]
+        except OSError:
+            return self._detect_local_ipv4()
 
     def _detect_local_ipv4(self) -> str | None:
         try:
