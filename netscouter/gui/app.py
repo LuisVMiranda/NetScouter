@@ -154,6 +154,7 @@ class NetScouterApp(ctk.CTk):
         self.honeypot = LocalHoneypot()
         self.packet_alert_cache: set[str] = set()
         self.quarantine_events: list[dict[str, str | bool]] = []
+        self.threat_events: list[dict[str, str | bool]] = []
         self.selected_remote_ip: str | None = None
         self.selected_port: int | None = None
         self.local_ipv4 = "n/a"
@@ -254,6 +255,7 @@ class NetScouterApp(ctk.CTk):
         self._start_honeypot()
         self._ensure_nmap_available()
         self._init_packet_alert_process()
+        self._ensure_tray_icon()
 
         self.after(120, self._drain_ui_queue)
         self.after(300, self._poll_packet_alert_queue)
@@ -318,6 +320,12 @@ class NetScouterApp(ctk.CTk):
             points = self._automation_points("frequency") if int(event.get("points") or 0) > 0 else 0
             reason = str(event.get("reason") or "")
             if ip:
+                try:
+                    obj = ipaddress.ip_address(ip)
+                    if obj.is_private or obj.is_loopback or obj.is_link_local:
+                        continue
+                except ValueError:
+                    continue
                 self._update_behavioral_score(ip, points, reason)
         self.after(300, self._poll_packet_alert_queue)
 
@@ -332,11 +340,18 @@ class NetScouterApp(ctk.CTk):
         popup.geometry(f"{width}x{height}+{x}+{y}")
         bg = "#111827" if self.current_mode == "dark" else "#DBEAFE"
         fg = "#E2E8F0" if self.current_mode == "dark" else "#1E3A8A"
+        accent = "#0EA5E9" if self.current_mode == "dark" else "#2563EB"
         popup.configure(fg_color=bg)
-        close_btn = ctk.CTkButton(popup, text="X", width=26, fg_color=STOP_RED, hover_color=STOP_RED_HOVER, command=popup.destroy)
-        close_btn.pack(anchor="ne", padx=6, pady=4)
-        body = ctk.CTkLabel(popup, text=message, text_color=fg, justify="left", anchor="w", wraplength=330)
-        body.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        shell = ctk.CTkFrame(popup, fg_color=bg)
+        shell.pack(fill="both", expand=True)
+        ctk.CTkFrame(shell, width=5, fg_color=accent).pack(side="left", fill="y")
+        content = ctk.CTkFrame(shell, fg_color=bg)
+        content.pack(side="left", fill="both", expand=True, padx=(8, 6), pady=4)
+        close_btn = ctk.CTkButton(content, text="X", width=26, fg_color=STOP_RED, hover_color=STOP_RED_HOVER, command=popup.destroy)
+        close_btn.pack(anchor="ne")
+        ctk.CTkLabel(content, text="NetScouter - Notification", text_color=fg, font=ctk.CTkFont(family="Roboto Medium", size=12, weight="bold"), anchor="w").pack(fill="x", padx=2)
+        body = ctk.CTkLabel(content, text=message, text_color=fg, justify="left", anchor="w", wraplength=320, font=ctk.CTkFont(family="Roboto Medium", size=12))
+        body.pack(fill="both", expand=True, padx=2, pady=(4, 6))
 
         def open_tab(_event: object) -> None:
             popup.destroy()
@@ -368,7 +383,7 @@ class NetScouterApp(ctk.CTk):
 
         self.tab_buttons: dict[str, ctk.CTkButton] = {}
         self.workspace_panes: dict[str, ctk.CTkFrame] = {}
-        tabs = ["Dashboard", "Packet Filtering", "Intelligence", "AI Auditor", "Ops/Schedule", "Settings"]
+        tabs = ["Dashboard", "Packet Filtering", "Possible Threats", "Intelligence", "AI Auditor", "Operations", "Settings"]
         for index, name in enumerate(tabs, start=1):
             button = ctk.CTkButton(
                 left_bar,
@@ -400,9 +415,10 @@ class NetScouterApp(ctk.CTk):
 
         self._build_dashboard_tab(self._create_workspace_pane("Dashboard"))
         self._build_packet_filtering_tab(self._create_workspace_pane("Packet Filtering"))
+        self._build_possible_threats_tab(self._create_workspace_pane("Possible Threats"))
         self._build_intelligence_tab(self._create_workspace_pane("Intelligence"))
         self._build_ai_auditor_tab(self._create_workspace_pane("AI Auditor"))
-        self._build_ops_schedule_tab(self._create_workspace_pane("Ops/Schedule"))
+        self._build_ops_schedule_tab(self._create_workspace_pane("Operations"))
         self._build_settings_tab(self._create_workspace_pane("Settings"))
         self._show_workspace_tab("Dashboard")
 
@@ -503,10 +519,14 @@ class NetScouterApp(ctk.CTk):
 
     def _build_ops_schedule_tab(self, pane: ctk.CTkFrame) -> None:
         pane.grid_columnconfigure(0, weight=1)
-        pane.grid_rowconfigure(3, weight=1)
+        pane.grid_rowconfigure(5, weight=1)
+
+        schedule_label = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        schedule_label.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
+        ctk.CTkLabel(schedule_label, text="Scheduling", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
 
         self.ops_row = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
-        self.ops_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
+        self.ops_row.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
         ctk.CTkLabel(self.ops_row, text="Every (hours)").grid(row=0, column=0, padx=6, pady=8)
         ctk.CTkEntry(self.ops_row, width=70, textvariable=self.schedule_hours_var, placeholder_text="6").grid(row=0, column=1, padx=6, pady=8)
         ctk.CTkButton(self.ops_row, text="Start Recurring", corner_radius=10, command=self.start_recurring_scan, width=130).grid(row=0, column=2, padx=6, pady=8)
@@ -517,9 +537,12 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkLabel(self.ops_row, text="Firewall:").grid(row=0, column=6, padx=(10, 4), pady=8)
         ctk.CTkLabel(self.ops_row, textvariable=self.firewall_status_var, width=300, anchor="w").grid(row=0, column=7, padx=4, pady=8, sticky="w")
 
+        automation_label = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        automation_label.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
+        ctk.CTkLabel(automation_label, text="Conditional Automations", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+
         automation_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
-        automation_card.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
-        ctk.CTkLabel(automation_card, text="Conditional Automations", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+        automation_card.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 6))
         ctk.CTkCheckBox(automation_card, text="Enable auto-response", variable=self.automation_enabled_var).grid(row=0, column=1, padx=6, pady=6)
         ctk.CTkLabel(automation_card, text="Point threshold").grid(row=0, column=2, padx=(12, 4), pady=6)
         ctk.CTkEntry(automation_card, width=70, textvariable=self.automation_threshold_var, placeholder_text="80").grid(row=0, column=3, padx=4, pady=6)
@@ -533,14 +556,18 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkLabel(automation_card, text="dns/vpn").grid(row=1, column=4, padx=(10,4), pady=(0,6), sticky="w")
         ctk.CTkEntry(automation_card, width=55, textvariable=self.automation_points_dns_var, placeholder_text="30").grid(row=1, column=5, padx=4, pady=(0,6), sticky="w")
 
+        lan_label = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        lan_label.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 6))
+        ctk.CTkLabel(lan_label, text="LAN Device Monitor", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+
         lan_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
-        lan_card.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        lan_card.grid(row=5, column=0, sticky="nsew", padx=8, pady=(0, 8))
         lan_card.grid_columnconfigure(0, weight=1)
         lan_card.grid_rowconfigure(2, weight=1)
 
         header = self._register_card(ctk.CTkFrame(lan_card, corner_radius=10))
         header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
-        ctk.CTkLabel(header, text="LAN Device Monitor", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
+        ctk.CTkLabel(header, text="LAN Controls").grid(row=0, column=0, padx=8, pady=6, sticky="w")
         ctk.CTkButton(header, text="Discover Devices", width=130, command=self.refresh_lan_devices).grid(row=0, column=1, padx=6, pady=6)
         ctk.CTkButton(header, text="Show IoT Anomalies", width=140, command=self.show_lan_anomalies).grid(row=0, column=2, padx=6, pady=6)
         ctk.CTkButton(header, text="Quarantine Device IP", width=150, command=self.quarantine_selected_lan_device).grid(row=0, column=3, padx=6, pady=6)
@@ -572,7 +599,7 @@ class NetScouterApp(ctk.CTk):
         pane.grid_rowconfigure(4, weight=1)
 
         dashboard_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
-        dashboard_card.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
+        dashboard_card.grid(row=0, column=0, sticky="ew", padx=8, pady=(10, 10))
         ctk.CTkLabel(dashboard_card, text="Dashboard Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
         ctk.CTkEntry(dashboard_card, textvariable=self.target_var, width=180, placeholder_text="Persistent target IP/hostname").grid(row=0, column=1, padx=6, pady=6)
         ctk.CTkEntry(dashboard_card, textvariable=self.port_range_var, width=120, placeholder_text="Persistent port range").grid(row=0, column=2, padx=6, pady=6)
@@ -580,7 +607,7 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkCheckBox(dashboard_card, text="Popup notifications", variable=self.popup_notifications_var).grid(row=0, column=4, padx=6, pady=6)
 
         packet_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
-        packet_card.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
+        packet_card.grid(row=1, column=0, sticky="ew", padx=8, pady=(5, 5))
         ctk.CTkLabel(packet_card, text="Packet Filtering Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
         ctk.CTkCheckBox(packet_card, text="Save Port Scan logs", variable=self.save_ports_var).grid(row=0, column=1, padx=6, pady=6)
         ctk.CTkCheckBox(packet_card, text="Save Packet logs", variable=self.save_packets_var).grid(row=0, column=2, padx=6, pady=6)
@@ -588,7 +615,7 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkCheckBox(packet_card, text="Save AI output", variable=self.save_ai_var).grid(row=0, column=4, padx=6, pady=6)
 
         intel_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
-        intel_card.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
+        intel_card.grid(row=2, column=0, sticky="ew", padx=8, pady=(5, 5))
         ctk.CTkLabel(intel_card, text="Intelligence/API Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
         ctk.CTkEntry(intel_card, textvariable=self.abuseipdb_key_var, width=220, placeholder_text="AbuseIPDB API key").grid(row=0, column=1, padx=6, pady=6)
         ctk.CTkEntry(intel_card, textvariable=self.virustotal_key_var, width=220, placeholder_text="VirusTotal API key").grid(row=0, column=2, padx=6, pady=6)
@@ -596,12 +623,35 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkButton(intel_card, text="Apply Intel Keys", width=130, command=self.apply_settings).grid(row=0, column=4, padx=6, pady=6)
 
         ai_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
-        ai_card.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
+        ai_card.grid(row=3, column=0, sticky="ew", padx=8, pady=(5, 10))
         ctk.CTkLabel(ai_card, text="AI Auditor/Database", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
         ctk.CTkButton(ai_card, text="Save All Settings", width=150, command=self.save_settings_preferences, fg_color="#0F766E", hover_color="#115E59").grid(row=0, column=4, padx=6, pady=6, sticky="e")
         ctk.CTkButton(ai_card, text="Clear DB Logs", width=130, command=self.clear_db_logs, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=2, padx=6, pady=6)
         ctk.CTkButton(ai_card, text="Clear Prompt Prefs", width=150, command=self.clear_prompt_prefs, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=3, padx=6, pady=6)
         ctk.CTkLabel(ai_card, text="Use Save All Settings to persist every option above.", anchor="w").grid(row=1, column=0, columnspan=5, padx=10, pady=(0,6), sticky="w")
+
+    def _build_possible_threats_tab(self, pane: ctk.CTkFrame) -> None:
+        pane.grid_columnconfigure(0, weight=1)
+        pane.grid_rowconfigure(1, weight=1)
+
+        header = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
+        ctk.CTkLabel(header, text="Possible Threats", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+        ctk.CTkButton(header, text="Refresh", width=100, command=self._refresh_threats_table).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkButton(header, text="Drop/Block IP", width=100, command=self._threat_block_selected).grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkButton(header, text="Quarantine IP", width=120, command=self._threat_quarantine_selected).grid(row=0, column=3, padx=6, pady=6)
+        ctk.CTkButton(header, text="Unban IP", width=100, command=self._threat_unban_selected).grid(row=0, column=4, padx=6, pady=6)
+
+        cols = ("timestamp", "ip", "action", "status", "reason")
+        self.threats_table = ttk.Treeview(pane, columns=cols, show="headings", height=16, selectmode="browse")
+        widths = {"timestamp": 170, "ip": 180, "action": 120, "status": 120, "reason": 420}
+        for col in cols:
+            self.threats_table.heading(col, text=col.title())
+            self.threats_table.column(col, width=widths[col], anchor="center")
+        y_scroll = ttk.Scrollbar(pane, orient="vertical", command=self.threats_table.yview, style="NetScouter.Vertical.TScrollbar")
+        self.threats_table.configure(yscrollcommand=y_scroll.set)
+        self.threats_table.grid(row=1, column=0, sticky="nsew", padx=(8, 0), pady=(0, 8))
+        y_scroll.grid(row=1, column=1, sticky="ns", padx=(0, 8), pady=(0, 8))
 
     def _build_results_table(self, parent: ctk.CTkFrame, row: int) -> None:
         self.table_card = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
@@ -908,6 +958,7 @@ class NetScouterApp(ctk.CTk):
 
         self.after(0, lambda: self._set_scan_running(True))
         self.after(0, lambda: self._log(f"Starting scan for {target} on {len(ports)} ports"))
+        self.after(0, lambda: self._notify_popup(f"Scan started for {target}", tab="Dashboard"))
 
         def enqueue_result(scan_result: ScanResult) -> None:
             self.intel_executor.submit(self._enrich_and_queue, scan_result, scan_id)
@@ -947,6 +998,7 @@ class NetScouterApp(ctk.CTk):
 
         self.after(0, lambda: self._set_scan_running(True))
         self.after(0, lambda: self._log("Scanning remote IPs from ESTABLISHED connections"))
+        self.after(0, lambda: self._notify_popup("Established scan started", tab="Dashboard"))
 
         def enqueue_result(scan_result: ScanResult) -> None:
             self.intel_executor.submit(self._enrich_and_queue, scan_result, scan_id)
@@ -961,6 +1013,7 @@ class NetScouterApp(ctk.CTk):
             return
         self._set_scan_running(False)
         self._log(message)
+        self._notify_popup(message, tab="Dashboard")
 
     def _trusted_system_roots(self) -> tuple[str, ...]:
         if platform.system().lower() == "windows":
@@ -1576,7 +1629,7 @@ class NetScouterApp(ctk.CTk):
         reasons = "; ".join(str(x) for x in board.get("reasons", []))
         self._log(f"🤖 Behavioral automation triggered for {remote_ip}: points={points}, action={action}, reasons={reasons}")
         record_scan_history("behavioral_automation", {"ip": remote_ip, "points": points, "action": action, "reasons": reasons})
-        self._notify_popup(f"Behavioral action: {action} on {remote_ip} ({points} pts)", tab="Ops/Schedule")
+        self._notify_popup(f"Behavioral action: {action} on {remote_ip} ({points} pts)", tab="Operations")
         if action == "banish":
             threading.Thread(target=self._banish_ip_worker, args=(remote_ip,), daemon=True, name="auto-banish").start()
         else:
@@ -1587,6 +1640,12 @@ class NetScouterApp(ctk.CTk):
             return
         remote_ip = str(payload.get("remote_ip", "")).strip()
         if not remote_ip:
+            return
+        try:
+            ip_obj = ipaddress.ip_address(remote_ip)
+            if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
+                return
+        except ValueError:
             return
 
         scope = self.automation_scope_var.get()
@@ -1800,6 +1859,7 @@ class NetScouterApp(ctk.CTk):
             f"Live packet stream started for {stream_target} on iface={self.packet_service.capture_interface} filter={self.packet_service.capture_filter or 'none'}. "
             "Logs appear below with IN/OUT direction, endpoint, and PID when available."
         )
+        self._notify_popup(f"Packet filter started: {stream_target}", tab="Packet Filtering")
         self.after(350, self._poll_packet_stream)
         self.after(4000, self._check_packet_flow)
 
@@ -1826,6 +1886,7 @@ class NetScouterApp(ctk.CTk):
             self._packet_log("Live packet stream stop timed out")
         self.packet_stream_status_var.set("Live stream idle")
         self._packet_log("Live packet stream stopped")
+        self._notify_popup("Packet filter stopped", tab="Packet Filtering")
 
     def export_packet_slice(self) -> None:
         ip = None if self.packet_service.mode == "local_network" else (self.selected_remote_ip or self.packet_service.remote_ip)
@@ -1875,7 +1936,7 @@ class NetScouterApp(ctk.CTk):
             )
             self._dispatch_packet_event(packet)
         self.packet_stream_console.delete("1.0", "end")
-        self.packet_stream_console.insert("1.0", "\n".join(lines))
+        self.packet_stream_console.insert("1.0", "\n\n".join(lines))
 
         alert_target = remote_ip if remote_ip else "local-network"
         alerts = evaluate_packet_signals(alert_target, packets)
@@ -1966,6 +2027,16 @@ class NetScouterApp(ctk.CTk):
         result = unbanish_ip(ip)
         if result.get("success") and ip in self.blocked_packet_ips:
             self.blocked_packet_ips.remove(ip)
+        self.threat_events.append(
+            {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ip": ip,
+                "action": "unban",
+                "status": "success" if bool(result.get("success")) else "failed",
+                "reason": str(result.get("message", "")),
+            }
+        )
+        self._refresh_threats_table()
         self._packet_log(f"Unblock request for {ip}: {result.get('message')}")
 
     def _open_packet_filter_context_menu(self, event: object) -> None:
@@ -2282,6 +2353,16 @@ class NetScouterApp(ctk.CTk):
         if result.get("success"):
             self.after(0, lambda: self._apply_containment_state(ip, "Blocked"))
             self.after(0, lambda: self._notify_popup(f"Blocked {ip} by firewall policy", tab="Intelligence"))
+        self.threat_events.append(
+            {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ip": ip,
+                "action": "block",
+                "status": "success" if bool(result.get("success")) else "failed",
+                "reason": str(result.get("message", "")),
+            }
+        )
+        self.after(0, self._refresh_threats_table)
         message = result.get("message", str(result))
         self.after(0, lambda: self._log(f"Banish {ip}: {message}"))
 
@@ -2305,11 +2386,21 @@ class NetScouterApp(ctk.CTk):
             "success": bool(result.get("success")),
         }
         self.quarantine_events.append(event)
+        self.threat_events.append(
+            {
+                "timestamp": str(event.get("timestamp", "")),
+                "ip": ip,
+                "action": "quarantine",
+                "status": "success" if bool(result.get("success")) else "failed",
+                "reason": str(result.get("message", "")),
+            }
+        )
         append_quarantine_interaction({**event, "result": result})
 
         if result.get("success"):
             self.after(0, lambda: self._apply_containment_state(ip, "Quarantined"))
             self.after(0, lambda: self._notify_popup(f"Quarantined {ip} to sinkhole", tab="Intelligence"))
+        self.after(0, self._refresh_threats_table)
         message = result.get("message", str(result))
         self.after(0, lambda: self._log(f"Quarantine {ip}: {message}"))
 
@@ -2344,9 +2435,9 @@ class NetScouterApp(ctk.CTk):
             self.intel_log_line_count -= 199
 
     def _packet_log(self, message: str) -> None:
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        timestamp = datetime.now().strftime("%S")
         rendered = self._format_log_message(message)
-        self.packet_stream_console.insert("end", f"[{timestamp}] {rendered}\n")
+        self.packet_stream_console.insert("end", f"[{timestamp}] {rendered}\n\n")
         self.packet_stream_console.see("end")
         self.packet_log_line_count += 1
         if self.packet_log_line_count > MAX_LOG_LINES:
@@ -2689,6 +2780,62 @@ class NetScouterApp(ctk.CTk):
         record_scan_history(source, summary)
         self._log(f"Saved selected log categories to DB from {source}.")
 
+    def _refresh_threats_table(self) -> None:
+        if not hasattr(self, "threats_table"):
+            return
+        self.threats_table.delete(*self.threats_table.get_children())
+        for idx, event in enumerate(self.threat_events[-400:]):
+            self.threats_table.insert(
+                "",
+                "end",
+                iid=f"threat-{idx}",
+                values=(
+                    event.get("timestamp", ""),
+                    event.get("ip", ""),
+                    event.get("action", ""),
+                    event.get("status", ""),
+                    event.get("reason", ""),
+                ),
+            )
+
+    def _selected_threat_ip(self) -> str | None:
+        if not hasattr(self, "threats_table"):
+            return None
+        selected = self.threats_table.selection()
+        if not selected:
+            return None
+        values = self.threats_table.item(selected[0], "values")
+        return str(values[1]) if len(values) > 1 else None
+
+    def _threat_block_selected(self) -> None:
+        ip = self._selected_threat_ip()
+        if not ip:
+            return
+        threading.Thread(target=self._banish_ip_worker, args=(ip,), daemon=True, name="threat-block").start()
+
+    def _threat_quarantine_selected(self) -> None:
+        ip = self._selected_threat_ip()
+        if not ip:
+            return
+        threading.Thread(target=self._quarantine_ip_worker, args=(ip,), daemon=True, name="threat-quarantine").start()
+
+    def _threat_unban_selected(self) -> None:
+        ip = self._selected_threat_ip()
+        if not ip:
+            return
+        result = unbanish_ip(ip)
+        self.threat_events.append(
+            {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ip": ip,
+                "action": "unban",
+                "status": "success" if bool(result.get("success")) else "failed",
+                "reason": str(result.get("message", "")),
+            }
+        )
+        self._refresh_threats_table()
+        self._log(f"Threat list unban {ip}: {result.get('message')}")
+
     def _rows_for_ai_analysis(self) -> list[dict[str, str | int | list[str]]]:
         rows = list(self._scan_rows_for_reporting())
         if self.ai_data_type_var.get() == "Packet Scan":
@@ -2868,9 +3015,9 @@ class NetScouterApp(ctk.CTk):
         self.focus_force()
 
     def _minimize_to_background(self) -> None:
-        self.withdraw()
         self._ensure_tray_icon()
         self._notify_popup("NetScouter is still running in the background tray.", tab="Dashboard")
+        self.withdraw()
 
     def _shutdown_application(self) -> None:
         if self.scan_job:
