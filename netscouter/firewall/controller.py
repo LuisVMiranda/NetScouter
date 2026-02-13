@@ -634,6 +634,48 @@ def banish_ip(ip: str) -> dict[str, Any]:
     }
 
 
+def unbanish_ip(ip: str) -> dict[str, Any]:
+    """Remove firewall rules that block traffic for the provided IP address."""
+    validated = _validate_ip(ip)
+    if validated is None or not validated["success"]:
+        return validated or {"success": False, "error": "invalid_ip", "message": "Invalid IP address."}
+
+    clean_ip = validated["ip"]
+    os_name = detect_os()
+
+    if os_name == "windows":
+        inbound = _run_command(["netsh", "advfirewall", "firewall", "delete", "rule", f"name=NetScouter Block {clean_ip} Inbound"])
+        outbound = _run_command(["netsh", "advfirewall", "firewall", "delete", "rule", f"name=NetScouter Block {clean_ip} Outbound"])
+        return {
+            "success": inbound.get("success", False) and outbound.get("success", False),
+            "platform": os_name,
+            "ip": clean_ip,
+            "results": {"inbound": inbound, "outbound": outbound},
+            "message": "Firewall unblock rules removed." if inbound.get("success", False) and outbound.get("success", False) else "Failed to remove one or more Windows unblock rules.",
+        }
+
+    if os_name == "linux":
+        ufw = _run_command(["ufw", "--force", "delete", "deny", "from", clean_ip])
+        if ufw.get("success", False):
+            return {"success": True, "platform": os_name, "ip": clean_ip, "message": "UFW deny rule removed.", "result": ufw}
+        iptables = _run_command(["iptables", "-D", "INPUT", "-s", clean_ip, "-j", "DROP"])
+        return {
+            "success": iptables.get("success", False),
+            "platform": os_name,
+            "ip": clean_ip,
+            "message": "iptables fallback delete applied." if iptables.get("success", False) else "Failed to remove deny rule.",
+            "result": iptables,
+        }
+
+    return {
+        "success": False,
+        "platform": os_name,
+        "ip": clean_ip,
+        "error": "unsupported_platform",
+        "message": "Unblock is unsupported on this operating system.",
+    }
+
+
 def is_sinkhole_healthy(host: str = "127.0.0.1", port: int = 25252, timeout: float = 0.6) -> bool:
     """Check if the local sinkhole listener is reachable."""
     try:

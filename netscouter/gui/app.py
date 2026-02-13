@@ -48,6 +48,7 @@ from netscouter.firewall.controller import (
     panic_button,
     remove_custom_rule,
     toggle_firewall,
+    unbanish_ip,
 )
 from netscouter.gui.icons import get_process_identity_label
 from netscouter.intel.geo import get_ip_intel
@@ -58,6 +59,8 @@ from netscouter.scanner.honeypot import LocalHoneypot
 from netscouter.scanner.packet_stream import PacketCaptureService, derive_lan_cidr
 from netscouter.scanner.lan_mapper import DeviceRegistry, correlate_iot_outbound_anomalies, discover_lan_devices
 from netscouter.scheduler.jobs import get_schedule_events, log_schedule_event
+from netscouter.storage import get_preference, record_scan_history, set_preference
+from netscouter.storage.preferences import DB_PATH
 
 DARK_THEME = {
     "window": "#0B0E14",
@@ -79,6 +82,11 @@ RISK_COLORS = {
     "dark": {"low": "#39FF14", "average": "#FFB100", "high": "#FF3131"},
     "light": {"low": "#16A34A", "average": "#D97706", "high": "#DC2626"},
 }
+
+STOP_RED = "#7F1D1D"
+STOP_RED_HOVER = "#991B1B"
+CLEAR_AMBER = "#B45309"
+CLEAR_AMBER_HOVER = "#92400E"
 
 QUEUE_BATCH_LIMIT = 120
 MAX_LOG_LINES = 2000
@@ -189,14 +197,33 @@ class NetScouterApp(ctk.CTk):
         self.automation_triggered_ips: set[str] = set()
         self.packet_stream_mode_var = ctk.StringVar(value="Selected Row")
         self.packet_scope_hint_var = ctk.StringVar(value="Scope: select a row or set target host")
+        self.packet_stream_status_var = ctk.StringVar(value="Live stream idle")
+        self.packet_risk_filter_var = ctk.StringVar(value="All")
+        self.packet_behavior_filter_var = ctk.StringVar(value="All")
+        self.packet_selected_summary_var = ctk.StringVar(value="Select a packet row to inspect details.")
+        self.packet_selected_packet: dict[str, object] | None = None
+        self.packet_filtered_packets: list[dict[str, object]] = []
+        self.blocked_packet_ips: set[str] = set()
+        self.ai_log_source_var = ctk.StringVar(value="App Logs")
+        self.ai_external_log_path_var = ctk.StringVar(value="")
+        self.ai_data_type_var = ctk.StringVar(value="Port Scan")
+        self.prompt_type_var = ctk.StringVar(value="Port Scan")
+        self.log_detail_mode_var = ctk.StringVar(value="Expert")
+        self.save_ports_var = ctk.BooleanVar(value=True)
+        self.save_packets_var = ctk.BooleanVar(value=True)
+        self.save_intel_var = ctk.BooleanVar(value=False)
+        self.save_ai_var = ctk.BooleanVar(value=False)
         self.local_info_visible = False
 
         self._configure_grid()
         self._build_layout()
+        self._load_saved_prompt_templates()
+        self._load_runtime_preferences()
         self._apply_theme()
         self.after(80, self._maximize_window)
 
         self._start_honeypot()
+        self._ensure_nmap_available()
 
         self.after(120, self._drain_ui_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -213,6 +240,30 @@ class NetScouterApp(ctk.CTk):
             self._log(f"Quarantine sinkhole ready on {self.honeypot.host}:{self.honeypot.port}")
         else:
             self._log(f"Quarantine sinkhole unavailable on {self.honeypot.host}:{self.honeypot.port}")
+
+    def _ensure_nmap_available(self) -> None:
+        if shutil.which("nmap"):
+            self._log("Dependency check: nmap detected.")
+            return
+        self._log("Dependency check: nmap missing. Attempting automatic install...")
+        system = platform.system().lower()
+        commands = []
+        if system == "linux":
+            commands = [["bash", "-lc", "apt-get update && apt-get install -y nmap"]]
+        elif system == "darwin":
+            commands = [["brew", "install", "nmap"]]
+        elif system == "windows":
+            commands = [["winget", "install", "Nmap.Nmap", "-e"]]
+        for cmd in commands:
+            try:
+                proc = subprocess.run(cmd, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"nmap auto-install failed: {exc}")
+                break
+            if proc.returncode == 0 and shutil.which("nmap"):
+                self._log("nmap installed successfully.")
+                return
+        self._log("Could not auto-install nmap. Please use installer/wizard for your OS.")
 
     def _configure_grid(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -234,7 +285,7 @@ class NetScouterApp(ctk.CTk):
 
         self.tab_buttons: dict[str, ctk.CTkButton] = {}
         self.workspace_panes: dict[str, ctk.CTkFrame] = {}
-        tabs = ["Dashboard", "Intelligence", "AI Auditor", "Ops/Schedule"]
+        tabs = ["Dashboard", "Packet Filtering", "Intelligence", "AI Auditor", "Ops/Schedule", "Settings"]
         for index, name in enumerate(tabs, start=1):
             button = ctk.CTkButton(
                 left_bar,
@@ -265,9 +316,11 @@ class NetScouterApp(ctk.CTk):
         self.workspace.grid_rowconfigure(0, weight=1)
 
         self._build_dashboard_tab(self._create_workspace_pane("Dashboard"))
+        self._build_packet_filtering_tab(self._create_workspace_pane("Packet Filtering"))
         self._build_intelligence_tab(self._create_workspace_pane("Intelligence"))
         self._build_ai_auditor_tab(self._create_workspace_pane("AI Auditor"))
         self._build_ops_schedule_tab(self._create_workspace_pane("Ops/Schedule"))
+        self._build_settings_tab(self._create_workspace_pane("Settings"))
         self._show_workspace_tab("Dashboard")
 
     def _maximize_window(self) -> None:
@@ -297,20 +350,20 @@ class NetScouterApp(ctk.CTk):
 
         self.scan_row = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         self.scan_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
-        self.scan_row.grid_columnconfigure(1, weight=1)
-        self.scan_row.grid_columnconfigure(6, weight=1)
-        ctk.CTkLabel(self.scan_row, text="Target").grid(row=0, column=0, padx=6, pady=8, sticky="w")
-        ctk.CTkEntry(self.scan_row, textvariable=self.target_var, placeholder_text="127.0.0.1 or hostname").grid(row=0, column=1, columnspan=3, padx=6, pady=8, sticky="ew")
+        self.scan_row.grid_columnconfigure(2, weight=1)
+        ctk.CTkLabel(self.scan_row, text="Target").grid(row=0, column=0, padx=(6, 2), pady=8, sticky="w")
+        ctk.CTkEntry(self.scan_row, textvariable=self.target_var, placeholder_text="127.0.0.1 or hostname").grid(row=0, column=1, columnspan=2, padx=(2, 6), pady=8, sticky="ew")
         ctk.CTkLabel(self.scan_row, text="Port Range").grid(row=0, column=4, padx=6, pady=8, sticky="w")
         ctk.CTkEntry(self.scan_row, width=140, textvariable=self.port_range_var, placeholder_text="20-1024").grid(row=0, column=5, padx=6, pady=8)
         self.scan_button = ctk.CTkButton(self.scan_row, text="Scan", corner_radius=10, command=self.start_scan, width=110)
-        self.scan_button.grid(row=0, column=7, padx=6, pady=8)
+        self.scan_button.grid(row=0, column=6, padx=6, pady=8, sticky="w")
         self.scan_established_button = ctk.CTkButton(self.scan_row, text="Scan Established", corner_radius=10, command=self.start_established_scan, width=150)
-        self.scan_established_button.grid(row=0, column=8, padx=6, pady=8)
+        self.scan_established_button.grid(row=0, column=7, padx=6, pady=8, sticky="w")
 
-        ctk.CTkButton(self.scan_row, text="Stop All", corner_radius=10, width=110, command=self.stop_all_tasks).grid(row=1, column=0, padx=6, pady=8)
-        ctk.CTkButton(self.scan_row, text="Show Charts", corner_radius=10, command=self.show_charts, width=110).grid(row=1, column=1, padx=6, pady=8)
-        self.local_info_button = ctk.CTkButton(self.scan_row, text="Show/Hide Local Info", corner_radius=10, command=self.toggle_local_network_info, width=160)
+        ctk.CTkButton(self.scan_row, text="Stop All", corner_radius=10, width=110, command=self.stop_all_tasks, fg_color=STOP_RED, hover_color=STOP_RED_HOVER).grid(row=0, column=8, padx=6, pady=8, sticky="w")
+        ctk.CTkButton(self.scan_row, text="Show Charts", corner_radius=10, command=self.show_charts, width=110).grid(row=1, column=0, padx=6, pady=8, sticky="w")
+        ctk.CTkButton(self.scan_row, text="Save Log (DB)", corner_radius=10, width=120, command=lambda: self.save_logs_to_db("dashboard")).grid(row=1, column=1, padx=6, pady=8, sticky="w")
+        self.local_info_button = ctk.CTkButton(self.scan_row, text="Local IP", corner_radius=10, command=self.toggle_local_network_info, width=120)
         self.local_info_button.grid(row=2, column=0, padx=6, pady=(2, 8), sticky="w")
 
         ctk.CTkLabel(
@@ -372,7 +425,7 @@ class NetScouterApp(ctk.CTk):
         self.ops_row = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         self.ops_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
         ctk.CTkLabel(self.ops_row, text="Every (hours)").grid(row=0, column=0, padx=6, pady=8)
-        ctk.CTkEntry(self.ops_row, width=70, textvariable=self.schedule_hours_var).grid(row=0, column=1, padx=6, pady=8)
+        ctk.CTkEntry(self.ops_row, width=70, textvariable=self.schedule_hours_var, placeholder_text="6").grid(row=0, column=1, padx=6, pady=8)
         ctk.CTkButton(self.ops_row, text="Start Recurring", corner_radius=10, command=self.start_recurring_scan, width=130).grid(row=0, column=2, padx=6, pady=8)
         ctk.CTkButton(self.ops_row, text="Stop Recurring", corner_radius=10, command=self.stop_recurring_scan, width=120).grid(row=0, column=3, padx=6, pady=8)
         self.ops_refresh_firewall_button = ctk.CTkButton(self.ops_row, text="Refresh Firewall", corner_radius=10, command=self.refresh_firewall_insight, width=140)
@@ -424,6 +477,40 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkButton(ops_actions, text="Export AI Audit", corner_radius=10, command=self.export_ai_audit, width=140).grid(row=0, column=0, padx=8, pady=10)
         ctk.CTkButton(ops_actions, text="Export XLSX", corner_radius=10, command=self.export_xlsx, width=120).grid(row=0, column=1, padx=8, pady=10)
 
+    def _build_settings_tab(self, pane: ctk.CTkFrame) -> None:
+        pane.grid_columnconfigure(0, weight=1)
+        pane.grid_rowconfigure(4, weight=1)
+
+        dashboard_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        dashboard_card.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
+        ctk.CTkLabel(dashboard_card, text="Dashboard Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+        ctk.CTkEntry(dashboard_card, textvariable=self.target_var, width=180, placeholder_text="Persistent target IP/hostname").grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkEntry(dashboard_card, textvariable=self.port_range_var, width=120, placeholder_text="Persistent port range").grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkOptionMenu(dashboard_card, values=["Layman", "Expert"], variable=self.log_detail_mode_var, width=110).grid(row=0, column=3, padx=6, pady=6)
+
+        packet_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        packet_card.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
+        ctk.CTkLabel(packet_card, text="Packet Filtering Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+        ctk.CTkCheckBox(packet_card, text="Save Port Scan logs", variable=self.save_ports_var).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkCheckBox(packet_card, text="Save Packet logs", variable=self.save_packets_var).grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkCheckBox(packet_card, text="Save Intel events", variable=self.save_intel_var).grid(row=0, column=3, padx=6, pady=6)
+        ctk.CTkCheckBox(packet_card, text="Save AI output", variable=self.save_ai_var).grid(row=0, column=4, padx=6, pady=6)
+
+        intel_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        intel_card.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
+        ctk.CTkLabel(intel_card, text="Intelligence/API Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+        ctk.CTkEntry(intel_card, textvariable=self.abuseipdb_key_var, width=220, placeholder_text="AbuseIPDB API key").grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkEntry(intel_card, textvariable=self.virustotal_key_var, width=220, placeholder_text="VirusTotal API key").grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkEntry(intel_card, textvariable=self.otx_key_var, width=220, placeholder_text="AlienVault OTX key").grid(row=0, column=3, padx=6, pady=6)
+        ctk.CTkButton(intel_card, text="Apply Settings", width=130, command=self.apply_settings).grid(row=0, column=4, padx=6, pady=6)
+
+        ai_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        ai_card.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
+        ctk.CTkLabel(ai_card, text="AI Auditor/Database", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+        ctk.CTkButton(ai_card, text="Save Preferences", width=130, command=self.save_settings_preferences).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkButton(ai_card, text="Clear DB Logs", width=130, command=self.clear_db_logs, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkButton(ai_card, text="Clear Prompt Prefs", width=150, command=self.clear_prompt_prefs, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=3, padx=6, pady=6)
+
     def _build_results_table(self, parent: ctk.CTkFrame, row: int) -> None:
         self.table_card = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
         self.table_card.grid(row=row, column=0, sticky="nsew", padx=8, pady=(0, 8))
@@ -447,22 +534,14 @@ class NetScouterApp(ctk.CTk):
         self.risk_filter = ctk.CTkOptionMenu(filter_left, values=["All Risk", "Low", "Average", "High"], variable=self.risk_filter_var, command=lambda _: self._rerender_table(), corner_radius=10, width=130)
         self.risk_filter.grid(row=0, column=2, padx=4, pady=6)
         ctk.CTkCheckBox(filter_left, text="Established-only", variable=self.established_only_var, command=self._rerender_table).grid(row=0, column=3, padx=4, pady=6)
-        ctk.CTkButton(filter_left, text="Clear Filters", corner_radius=10, width=120, command=self.clear_filters).grid(row=0, column=4, padx=4, pady=6)
+        ctk.CTkButton(filter_left, text="Clear Filters", corner_radius=10, width=120, command=self.clear_filters, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=4, padx=4, pady=6)
+        ctk.CTkButton(filter_left, text="Clear Scan Logs", corner_radius=10, width=130, command=self.clear_scan_logs, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=5, padx=4, pady=6)
 
-        ctk.CTkOptionMenu(filter_right, values=["Selected Row", "Target Host", "Local Network"], variable=self.packet_stream_mode_var, width=140, command=self._on_packet_scope_changed).grid(row=0, column=0, padx=4, pady=6)
-        ctk.CTkButton(filter_right, text="Start Live Packet Stream", corner_radius=10, width=180, command=self.start_live_packet_stream).grid(row=0, column=1, padx=4, pady=6)
-        ctk.CTkButton(filter_right, text="One-click LAN Capture", corner_radius=10, width=170, command=self.start_network_wide_capture).grid(row=0, column=2, padx=4, pady=6)
-        ctk.CTkButton(filter_right, text="Export packet slice", corner_radius=10, width=150, command=self.export_packet_slice).grid(row=0, column=3, padx=4, pady=6)
-        ctk.CTkButton(filter_right, text="Clear Scan Logs", corner_radius=10, width=130, command=self.clear_scan_logs).grid(row=0, column=4, padx=4, pady=6)
-        ctk.CTkButton(filter_right, text="◀", width=38, command=self._prev_table_page).grid(row=0, column=5, padx=(6, 2), pady=6)
-        ctk.CTkButton(filter_right, text="▶", width=38, command=self._next_table_page).grid(row=0, column=6, padx=(2, 6), pady=6)
+        ctk.CTkButton(filter_right, text="◀", width=38, command=self._prev_table_page).grid(row=0, column=0, padx=(6, 2), pady=6)
+        ctk.CTkButton(filter_right, text="▶", width=38, command=self._next_table_page).grid(row=0, column=1, padx=(2, 6), pady=6)
 
-        self.packet_stream_status_var = ctk.StringVar(value="Live stream idle")
-        ctk.CTkLabel(self.filter_row, textvariable=self.packet_stream_status_var).grid(row=1, column=1, padx=8, pady=(0, 6), sticky="e")
-        ctk.CTkLabel(self.filter_row, textvariable=self.packet_scope_hint_var).grid(row=1, column=0, padx=8, pady=(0, 6), sticky="w")
         self.filter_summary_var = ctk.StringVar(value="Showing 0 / 0 rows")
-        ctk.CTkLabel(self.filter_row, textvariable=self.filter_summary_var).grid(row=2, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="w")
-        self._on_packet_scope_changed()
+        ctk.CTkLabel(self.filter_row, textvariable=self.filter_summary_var).grid(row=1, column=0, columnspan=2, padx=8, pady=(0, 8), sticky="w")
 
         columns = ("port", "status", "remote_ip", "process", "exe_path", "location", "provider", "consensus", "risk", "containment", "alerts")
         self.results_table = ttk.Treeview(self.table_card, columns=columns, show="headings", selectmode="extended")
@@ -487,17 +566,49 @@ class NetScouterApp(ctk.CTk):
         self.dashboard_console_card = self._register_card(ctk.CTkFrame(self.table_card, corner_radius=10))
         self.dashboard_console_card.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
         self.dashboard_console_card.grid_columnconfigure(0, weight=1)
-        self.dashboard_console_tabs = ctk.CTkTabview(self.dashboard_console_card, corner_radius=10, height=180)
-        self.dashboard_console_tabs.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
-        regular_tab = self.dashboard_console_tabs.add("Regular Logs")
-        packet_tab = self.dashboard_console_tabs.add("Packet Stream")
-        self.dashboard_console_tabs.set("Regular Logs")
-        regular_tab.grid_columnconfigure(0, weight=1)
-        packet_tab.grid_columnconfigure(0, weight=1)
-        self.dashboard_console = ctk.CTkTextbox(regular_tab, corner_radius=10, height=150)
-        self.dashboard_console.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
-        self.packet_stream_console = ctk.CTkTextbox(packet_tab, corner_radius=10, height=150)
-        self.packet_stream_console.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
+        self.dashboard_console = ctk.CTkTextbox(self.dashboard_console_card, corner_radius=10, height=150)
+        self.dashboard_console.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
+
+
+    def _build_packet_filtering_tab(self, pane: ctk.CTkFrame) -> None:
+        pane.grid_columnconfigure(0, weight=1)
+        pane.grid_rowconfigure(2, weight=1)
+
+        controls = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        controls.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
+        ctk.CTkOptionMenu(controls, values=["Selected Row", "Target Host", "Local Network"], variable=self.packet_stream_mode_var, width=140, command=self._on_packet_scope_changed).grid(row=0, column=0, padx=6, pady=6)
+        ctk.CTkButton(controls, text="Start Live Packet Stream", corner_radius=10, width=180, command=self.start_live_packet_stream).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkButton(controls, text="Stop", corner_radius=10, width=90, command=self.stop_live_packet_stream, fg_color=STOP_RED, hover_color=STOP_RED_HOVER).grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkButton(controls, text="Export packet slice", corner_radius=10, width=140, command=self.export_packet_slice).grid(row=0, column=3, padx=6, pady=6)
+        ctk.CTkButton(controls, text="Save Log (DB)", corner_radius=10, width=120, command=lambda: self.save_logs_to_db("packet_filtering")).grid(row=0, column=6, padx=6, pady=6)
+        ctk.CTkOptionMenu(controls, values=["All", "High", "Average", "Low"], variable=self.packet_risk_filter_var, width=100, command=lambda _x: self._refresh_packet_filtering_table()).grid(row=0, column=4, padx=6, pady=6)
+        ctk.CTkOptionMenu(controls, values=["All", "Weird", "Normal"], variable=self.packet_behavior_filter_var, width=100, command=lambda _x: self._refresh_packet_filtering_table()).grid(row=0, column=5, padx=6, pady=6)
+        ctk.CTkLabel(controls, textvariable=self.packet_stream_status_var).grid(row=1, column=0, columnspan=3, padx=8, pady=(0, 6), sticky="w")
+        ctk.CTkLabel(controls, textvariable=self.packet_scope_hint_var).grid(row=1, column=3, columnspan=3, padx=8, pady=(0, 6), sticky="e")
+
+        self.packet_filter_table = ttk.Treeview(pane, columns=("time", "connection", "proto", "risk", "behavior", "process"), show="headings", height=12)
+        for col, width in {"time": 180, "connection": 380, "proto": 90, "risk": 90, "behavior": 140, "process": 220}.items():
+            self.packet_filter_table.heading(col, text=col.title())
+            self.packet_filter_table.column(col, width=width, anchor="center")
+        pkt_y_scroll = ttk.Scrollbar(pane, orient="vertical", command=self.packet_filter_table.yview, style="NetScouter.Vertical.TScrollbar")
+        self.packet_filter_table.configure(yscrollcommand=pkt_y_scroll.set)
+        self.packet_filter_table.grid(row=1, column=0, sticky="nsew", padx=(8, 0), pady=(0, 6))
+        pkt_y_scroll.grid(row=1, column=1, sticky="ns", padx=(0, 8), pady=(0, 6))
+        self.packet_filter_table.bind("<<TreeviewSelect>>", self._on_packet_filter_select)
+        self.packet_filter_table.bind("<Button-3>", self._open_packet_filter_context_menu)
+
+        detail = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        detail.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        detail.grid_columnconfigure(0, weight=1)
+        detail.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(detail, textvariable=self.packet_selected_summary_var, anchor="w", justify="left").grid(row=0, column=0, sticky="ew", padx=8, pady=6)
+        self.packet_detail_box = ctk.CTkTextbox(detail, corner_radius=10, height=180)
+        self.packet_detail_box.grid(row=1, column=0, sticky="nsew", padx=8, pady=6)
+        self.packet_stream_console = self.packet_detail_box
+        action_row = ctk.CTkFrame(detail, fg_color="transparent")
+        action_row.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
+        ctk.CTkButton(action_row, text="Block Selected IP", width=140, command=self.block_selected_packet_ip).grid(row=0, column=0, padx=4, pady=4)
+        ctk.CTkButton(action_row, text="Unblock Selected IP", width=160, command=self.unblock_selected_packet_ip).grid(row=0, column=1, padx=4, pady=4)
 
     def _build_console(self, parent: ctk.CTkFrame, row: int, *, compact: bool = False) -> None:
         self.console_card = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
@@ -508,37 +619,49 @@ class NetScouterApp(ctk.CTk):
         header = self._register_card(ctk.CTkFrame(self.console_card, corner_radius=10))
         header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
         ctk.CTkLabel(header, text="Console Logs").grid(row=0, column=0, sticky="w", padx=6, pady=6)
-        ctk.CTkButton(header, text="Clear Logs", width=110, command=self.clear_intelligence_logs).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkButton(header, text="Clear Logs", width=110, command=self.clear_intelligence_logs, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=1, padx=6, pady=6)
         self.intelligence_console = ctk.CTkTextbox(self.console_card, corner_radius=10, height=180 if compact else 320)
         self.intelligence_console.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
 
     def _build_ai_auditor_tab(self, pane: ctk.CTkFrame) -> None:
         pane.grid_columnconfigure(0, weight=1)
-        pane.grid_rowconfigure(4, weight=1)
+        pane.grid_columnconfigure(1, weight=0)
+        pane.grid_rowconfigure(6, weight=1)
 
         ai_header = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         ai_header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
         ctk.CTkLabel(ai_header, text="AI Feedback from Logs").grid(row=0, column=0, sticky="w", padx=6, pady=6)
         ctk.CTkButton(ai_header, text="Analyze Logs", corner_radius=10, command=self.analyze_logs, width=120).grid(row=0, column=1, padx=6, pady=6)
-        ctk.CTkButton(ai_header, text="Cancel", corner_radius=10, command=self.cancel_ai_analysis, width=90).grid(row=0, column=2, padx=6, pady=6)
-        ctk.CTkButton(ai_header, text="Clear Logs", corner_radius=10, command=self.clear_ai_logs, width=100).grid(row=0, column=3, padx=6, pady=6)
+        ctk.CTkButton(ai_header, text="Cancel", corner_radius=10, command=self.cancel_ai_analysis, width=90, fg_color=STOP_RED, hover_color=STOP_RED_HOVER).grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkButton(ai_header, text="Clear Logs", corner_radius=10, command=self.clear_ai_logs, width=100, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=3, padx=6, pady=6)
 
         ai_filter_row = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         ai_filter_row.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
         ctk.CTkCheckBox(ai_filter_row, text="High risk only", variable=self.ai_high_risk_only_var).grid(row=0, column=0, padx=6, pady=6)
         ctk.CTkCheckBox(ai_filter_row, text="Open ports only", variable=self.ai_open_ports_only_var).grid(row=0, column=1, padx=6, pady=6)
         ctk.CTkCheckBox(ai_filter_row, text="Alerts only", variable=self.ai_alerts_only_var).grid(row=0, column=2, padx=6, pady=6)
-        ctk.CTkLabel(ai_filter_row, text="Max rows").grid(row=0, column=3, padx=(10, 4), pady=6)
-        ctk.CTkEntry(ai_filter_row, width=80, textvariable=self.ai_max_rows_var, placeholder_text="600").grid(row=0, column=4, padx=4, pady=6)
-        ctk.CTkLabel(ai_filter_row, textvariable=self.ai_elapsed_var).grid(row=0, column=5, padx=(12, 6), pady=6)
+        ctk.CTkOptionMenu(ai_filter_row, values=["App Logs", "External File"], variable=self.ai_log_source_var, width=120).grid(row=0, column=3, padx=6, pady=6)
+        ctk.CTkOptionMenu(ai_filter_row, values=["Port Scan", "Packet Scan"], variable=self.ai_data_type_var, width=110).grid(row=0, column=4, padx=6, pady=6)
+        ctk.CTkEntry(ai_filter_row, width=220, textvariable=self.ai_external_log_path_var, placeholder_text="External log path (.json/.txt)").grid(row=0, column=5, padx=6, pady=6)
+        ctk.CTkLabel(ai_filter_row, text="Max rows").grid(row=0, column=6, padx=(10, 4), pady=6)
+        ctk.CTkEntry(ai_filter_row, width=80, textvariable=self.ai_max_rows_var, placeholder_text="600").grid(row=0, column=7, padx=4, pady=6)
+        ctk.CTkLabel(ai_filter_row, textvariable=self.ai_elapsed_var).grid(row=0, column=8, padx=(12, 6), pady=6)
+
+        prompt_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        prompt_card.grid(row=0, column=1, rowspan=2, sticky="ne", padx=(0, 8), pady=(8, 6))
+        ctk.CTkLabel(prompt_card, text="PROMPT EDITOR", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=8, pady=6, sticky="w")
+        ctk.CTkOptionMenu(prompt_card, values=["Port Scan", "Packet Scan"], variable=self.prompt_type_var, width=110, command=lambda _v: self._load_prompt_editor_text()).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkButton(prompt_card, text="Save Prompt", width=110, command=self.save_prompt_editor).grid(row=0, column=2, padx=6, pady=6)
+        self.prompt_editor_box = ctk.CTkTextbox(prompt_card, corner_radius=10, height=100, width=420)
+        self.prompt_editor_box.grid(row=1, column=0, columnspan=3, sticky="ew", padx=8, pady=(0, 8))
 
         self.ai_status_var = ctk.StringVar(value="Run scans, choose AI filters, then Analyze Logs.")
-        ctk.CTkLabel(pane, textvariable=self.ai_status_var, anchor="w", justify="left").grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
+        ctk.CTkLabel(pane, textvariable=self.ai_status_var, anchor="w", justify="left").grid(row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 6))
         self.ai_progress = ctk.CTkProgressBar(pane)
-        self.ai_progress.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 6))
+        self.ai_progress.grid(row=4, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 6))
         self.ai_progress.set(0)
         self.ai_feedback_box = ctk.CTkTextbox(pane, corner_radius=10)
-        self.ai_feedback_box.grid(row=4, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.ai_feedback_box.grid(row=6, column=0, columnspan=2, sticky="nsew", padx=8, pady=(0, 8))
 
     def _build_firewall_controls(self, parent: ctk.CTkFrame, *, start_row: int = 0) -> None:
         actions_row = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
@@ -598,10 +721,11 @@ class NetScouterApp(ctk.CTk):
         )
         style.configure("Treeview.Heading", background=theme["card"], foreground=theme["text"], relief="flat")
         style.map("Treeview", background=[("selected", theme["scan"])], foreground=[("selected", "#0B0E14")])
-        scroll_thumb = "#334155" if self.current_mode == "dark" else "#CBD5E1"
-        trough = "#1E293B" if self.current_mode == "dark" else "#E2E8F0"
-        style.configure("NetScouter.Vertical.TScrollbar", gripcount=0, troughcolor=trough, background=scroll_thumb, bordercolor=trough, arrowcolor=theme["text"], lightcolor=scroll_thumb, darkcolor=scroll_thumb)
-        style.configure("NetScouter.Horizontal.TScrollbar", gripcount=0, troughcolor=trough, background=scroll_thumb, bordercolor=trough, arrowcolor=theme["text"], lightcolor=scroll_thumb, darkcolor=scroll_thumb)
+        scroll_thumb = "#374151" if self.current_mode == "dark" else "#BFDBFE"
+        trough = "#111827" if self.current_mode == "dark" else "#EFF6FF"
+        border = "#1F2937" if self.current_mode == "dark" else "#93C5FD"
+        style.configure("NetScouter.Vertical.TScrollbar", gripcount=0, troughcolor=trough, background=scroll_thumb, bordercolor=border, arrowcolor=theme["text"], lightcolor=scroll_thumb, darkcolor=scroll_thumb, relief="flat")
+        style.configure("NetScouter.Horizontal.TScrollbar", gripcount=0, troughcolor=trough, background=scroll_thumb, bordercolor=border, arrowcolor=theme["text"], lightcolor=scroll_thumb, darkcolor=scroll_thumb, relief="flat")
 
         self.results_table.tag_configure("even", background=theme["card"])
         self.results_table.tag_configure("odd", background=theme["row_alt"])
@@ -612,6 +736,12 @@ class NetScouterApp(ctk.CTk):
         self.results_table.tag_configure("risk_low", foreground=palette["low"])
         self.results_table.tag_configure("risk_average", foreground=palette["average"])
         self.results_table.tag_configure("risk_high", foreground=palette["high"])
+        if hasattr(self, "packet_filter_table"):
+            self.packet_filter_table.tag_configure("pkt_risk_low", foreground=palette["low"])
+            self.packet_filter_table.tag_configure("pkt_risk_average", foreground=palette["average"])
+            self.packet_filter_table.tag_configure("pkt_risk_high", foreground=palette["high"])
+            self.packet_filter_table.tag_configure("pkt_behavior_normal", foreground=palette["low"])
+            self.packet_filter_table.tag_configure("pkt_behavior_weird", foreground=palette["average"])
 
     def _switch_theme(self, selected: str) -> None:
         selected_lower = selected.lower()
@@ -845,7 +975,7 @@ class NetScouterApp(ctk.CTk):
 
         payload = {
             "scan_id": scan_id,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             "port": scan_result.port,
             "status": "Open" if scan_result.is_open else "Closed",
             "remote_ip": scan_result.host,
@@ -1203,7 +1333,7 @@ class NetScouterApp(ctk.CTk):
         menu = Menu(self, tearoff=0)
         menu.add_command(label="Track packets for selected device", command=self.track_selected_lan_device_packets)
         menu.add_command(label="Packet breakdown (last 40)", command=self.show_selected_lan_packet_breakdown)
-        menu.tk_popup(event.x_root, event.y_root)
+        menu.tk_popup(int(getattr(event, "x_root", 0)), int(getattr(event, "y_root", 0)))
 
     def track_selected_lan_device_packets(self) -> None:
         ip = self._selected_lan_ip()
@@ -1351,7 +1481,7 @@ class NetScouterApp(ctk.CTk):
             menu.add_command(label="Stop packet scanning", command=self.stop_live_packet_stream)
         else:
             menu.add_command(label="Start packet scanning", command=self.start_live_packet_stream)
-        menu.tk_popup(event.x_root, event.y_root)
+        menu.tk_popup(int(getattr(event, "x_root", 0)), int(getattr(event, "y_root", 0)))
 
     def watch_selected_connections(self) -> None:
         selection = self.results_table.selection()
@@ -1544,8 +1674,7 @@ class NetScouterApp(ctk.CTk):
             return
 
         active_ip = self.packet_service.remote_ip or self.selected_remote_ip or ""
-        if active_ip:
-            self._render_packet_slice(active_ip)
+        self._render_packet_slice(active_ip)
 
         self.after(350, self._poll_packet_stream)
 
@@ -1585,6 +1714,120 @@ class NetScouterApp(ctk.CTk):
             if alert not in self.packet_alert_cache:
                 self.packet_alert_cache.add(alert)
                 self._packet_log(f"[Packet Alert] {alert}")
+
+        self._refresh_packet_filtering_table()
+
+    def _classify_packet_row(self, packet: dict[str, object]) -> tuple[str, str]:
+        malformed = bool(packet.get("malformed"))
+        flags = str(packet.get("tcp_flags") or "")
+        proto = str(packet.get("proto") or "Unknown")
+        risk = "Low"
+        behavior = "Normal"
+        if malformed or "F" in flags or "S" in flags and "A" not in flags:
+            behavior = "Weird"
+            risk = "High"
+        elif proto == "ICMP":
+            risk = "Average"
+        return risk, behavior
+
+    def _refresh_packet_filtering_table(self) -> None:
+        table = getattr(self, "packet_filter_table", None)
+        if table is None:
+            return
+        table.delete(*table.get_children())
+        packets = self.packet_service.get_packets(limit=PACKET_SLICE_LIMIT)
+        self.packet_filtered_packets = []
+        for index, packet in enumerate(packets[-PACKET_SLICE_LIMIT:]):
+            risk, behavior = self._classify_packet_row(packet)
+            if self.packet_risk_filter_var.get() != "All" and risk != self.packet_risk_filter_var.get():
+                continue
+            if self.packet_behavior_filter_var.get() != "All" and behavior != self.packet_behavior_filter_var.get():
+                continue
+            self.packet_filtered_packets.append(packet)
+            conn = f"{packet.get('src')}:{packet.get('raw', {}).get('src_port')} -> {packet.get('dst')}:{packet.get('raw', {}).get('dst_port')}"
+            iid = f"pkt-{index}"
+            pkt_time = str(packet.get("timestamp") or "")[:19].replace("T", " ")
+            table.insert("", "end", iid=iid, values=(pkt_time, conn, packet.get("proto"), risk, behavior, packet.get("process_name") or "unknown"), tags=(f"pkt_risk_{risk.lower()}", f"pkt_behavior_{behavior.lower()}"))
+
+    def _on_packet_filter_select(self, _event: object = None) -> None:
+        selected = self.packet_filter_table.selection()
+        if not selected:
+            return
+        idx = self.packet_filter_table.index(selected[0])
+        if idx >= len(self.packet_filtered_packets):
+            return
+        packet = self.packet_filtered_packets[idx]
+        self.packet_selected_packet = packet
+        remote_ip = str(packet.get("dst") or "")
+        self.packet_selected_summary_var.set(f"Focused connection: {packet.get('src')} -> {packet.get('dst')} ({packet.get('proto')})")
+        self.packet_detail_box.delete("1.0", "end")
+        self.packet_detail_box.insert("1.0", str(packet))
+        if remote_ip:
+            self.selected_remote_ip = remote_ip
+
+    def block_selected_packet_ip(self) -> None:
+        if not self.packet_selected_packet:
+            return
+        ip = str(self.packet_selected_packet.get("dst") or self.packet_selected_packet.get("src") or "")
+        if not ip:
+            return
+        result = enforce_ip_policy(ip, action="block")
+        if result.get("success"):
+            self.blocked_packet_ips.add(ip)
+        self._packet_log(f"Block request for {ip}: {result.get('message')}")
+
+    def unblock_selected_packet_ip(self) -> None:
+        if not self.packet_selected_packet:
+            return
+        ip = str(self.packet_selected_packet.get("dst") or self.packet_selected_packet.get("src") or "")
+        if not ip:
+            return
+        result = unbanish_ip(ip)
+        if result.get("success") and ip in self.blocked_packet_ips:
+            self.blocked_packet_ips.remove(ip)
+        self._packet_log(f"Unblock request for {ip}: {result.get('message')}")
+
+    def _open_packet_filter_context_menu(self, event: object) -> None:
+        row_y = getattr(event, "y", 0)
+        row_id = self.packet_filter_table.identify_row(row_y)
+        if row_id:
+            self.packet_filter_table.selection_set(row_id)
+        menu = Menu(self, tearoff=0)
+        menu.add_command(label="Inspect packet details", command=self._open_packet_investigation_popup)
+        menu.tk_popup(int(getattr(event, "x_root", 0)), int(getattr(event, "y_root", 0)))
+
+    def _open_packet_investigation_popup(self) -> None:
+        if not self.packet_selected_packet:
+            return
+        popup = ctk.CTkToplevel(self)
+        popup.title("Packet Investigation")
+        popup.geometry("760x520")
+        popup.grid_columnconfigure(0, weight=1)
+        popup.grid_rowconfigure(1, weight=1)
+        pkt = self.packet_selected_packet
+        headline = (
+            f"Connection: {pkt.get('src')}:{pkt.get('raw', {}).get('src_port')} -> "
+            f"{pkt.get('dst')}:{pkt.get('raw', {}).get('dst_port')} | proto={pkt.get('proto')}"
+        )
+        ctk.CTkLabel(popup, text=headline, anchor="w", justify="left").grid(row=0, column=0, padx=10, pady=8, sticky="ew")
+        detail = ctk.CTkTextbox(popup, corner_radius=10)
+        detail.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="nsew")
+        risk, behavior = self._classify_packet_row(pkt)
+        detail.insert(
+            "1.0",
+            "\n".join(
+                [
+                    f"timestamp: {pkt.get('timestamp')}",
+                    f"risk: {risk}",
+                    f"behavior: {behavior}",
+                    f"process: {pkt.get('process_name')} (pid={pkt.get('pid')})",
+                    f"tcp_flags: {pkt.get('tcp_flags')}",
+                    f"packet_length: {pkt.get('packet_length')}",
+                    f"malformed: {pkt.get('malformed')} parse_error={pkt.get('parse_error')}",
+                    f"raw: {pkt.get('raw')}",
+                ]
+            ),
+        )
 
     def _escalate_risk_for_ip(self, remote_ip: str) -> None:
         changed = False
@@ -1873,7 +2116,7 @@ class NetScouterApp(ctk.CTk):
             return
 
         event = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             "action": "quarantine",
             "ip": ip,
             "sinkhole": f"{self.honeypot.host}:{self.honeypot.port}",
@@ -1898,7 +2141,8 @@ class NetScouterApp(ctk.CTk):
 
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.dashboard_console.insert("end", f"[{timestamp}] {message}\n")
+        rendered = self._format_log_message(message)
+        self.dashboard_console.insert("end", f"[{timestamp}] {rendered}\n")
         self.dashboard_console.see("end")
         self.log_line_count += 1
 
@@ -1908,7 +2152,8 @@ class NetScouterApp(ctk.CTk):
 
     def _intel_log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.intelligence_console.insert("end", f"[{timestamp}] {message}\n")
+        rendered = self._format_log_message(message)
+        self.intelligence_console.insert("end", f"[{timestamp}] {rendered}\n")
         self.intelligence_console.see("end")
         self.intel_log_line_count += 1
         if self.intel_log_line_count > MAX_LOG_LINES:
@@ -1917,12 +2162,20 @@ class NetScouterApp(ctk.CTk):
 
     def _packet_log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.packet_stream_console.insert("end", f"[{timestamp}] {message}\n")
+        rendered = self._format_log_message(message)
+        self.packet_stream_console.insert("end", f"[{timestamp}] {rendered}\n")
         self.packet_stream_console.see("end")
         self.packet_log_line_count += 1
         if self.packet_log_line_count > MAX_LOG_LINES:
             self.packet_stream_console.delete("1.0", "200.0")
             self.packet_log_line_count -= 199
+
+    def _format_log_message(self, message: str) -> str:
+        if self.log_detail_mode_var.get() == "Expert":
+            return message
+        simplified = message.replace("ESTABLISHED", "connected").replace("consensus", "risk match")
+        simplified = simplified.replace("iface", "interface")
+        return simplified
 
     def clear_intelligence_logs(self) -> None:
         self.intelligence_console.delete("1.0", "end")
@@ -2038,7 +2291,7 @@ class NetScouterApp(ctk.CTk):
         ).grid(row=0, column=3, padx=6, pady=8)
 
         ctk.CTkLabel(controls, text="Source IP").grid(row=0, column=4, padx=6, pady=8)
-        ctk.CTkEntry(controls, textvariable=self.timeline_source_ip_var, width=160).grid(row=0, column=5, padx=6, pady=8)
+        ctk.CTkEntry(controls, textvariable=self.timeline_source_ip_var, width=160, placeholder_text="Filter source IP").grid(row=0, column=5, padx=6, pady=8)
 
         figure = Figure(figsize=(10.2, 6.8), dpi=100)
         ax1 = figure.add_subplot(221)
@@ -2139,8 +2392,8 @@ class NetScouterApp(ctk.CTk):
             return
 
         context = resolve_local_network_context()
-        analyst_prompt = build_analyst_prompt()
-        engine_prompt = build_network_engine_prompt(context)
+        analyst_prompt = self.prompt_templates.get("Port Scan") or build_analyst_prompt()
+        engine_prompt = self.prompt_templates.get("Packet Scan") or build_network_engine_prompt(context)
         export_ai_audit_report(
             rows,
             path,
@@ -2168,8 +2421,91 @@ class NetScouterApp(ctk.CTk):
         self.ai_status_var.set("AI output cleared.")
         self.ai_elapsed_var.set("Elapsed: 00:00")
 
+    def _load_saved_prompt_templates(self) -> None:
+        self.prompt_templates = {
+            "Port Scan": str(get_preference("prompt.port_scan", build_analyst_prompt())),
+            "Packet Scan": str(get_preference("prompt.packet_scan", build_network_engine_prompt())),
+        }
+        self._load_prompt_editor_text()
+
+    def _load_runtime_preferences(self) -> None:
+        self.target_var.set(str(get_preference("settings.target", self.target_var.get())))
+        self.port_range_var.set(str(get_preference("settings.ports", self.port_range_var.get())))
+        self.log_detail_mode_var.set(str(get_preference("settings.log_mode", self.log_detail_mode_var.get())))
+        self.save_ports_var.set(bool(get_preference("settings.save_ports", self.save_ports_var.get())))
+        self.save_packets_var.set(bool(get_preference("settings.save_packets", self.save_packets_var.get())))
+        self.save_intel_var.set(bool(get_preference("settings.save_intel", self.save_intel_var.get())))
+        self.save_ai_var.set(bool(get_preference("settings.save_ai", self.save_ai_var.get())))
+
+    def _load_prompt_editor_text(self) -> None:
+        if not hasattr(self, "prompt_editor_box"):
+            return
+        key = self.prompt_type_var.get()
+        self.prompt_editor_box.delete("1.0", "end")
+        self.prompt_editor_box.insert("1.0", self.prompt_templates.get(key, ""))
+
+    def save_prompt_editor(self) -> None:
+        key = self.prompt_type_var.get()
+        value = self.prompt_editor_box.get("1.0", "end").strip()
+        self.prompt_templates[key] = value
+        pref_key = "prompt.port_scan" if key == "Port Scan" else "prompt.packet_scan"
+        set_preference(pref_key, value)
+        self.ai_status_var.set(f"Saved {key} prompt.")
+
+    def save_settings_preferences(self) -> None:
+        set_preference("settings.target", self.target_var.get().strip())
+        set_preference("settings.ports", self.port_range_var.get().strip())
+        set_preference("settings.log_mode", self.log_detail_mode_var.get())
+        set_preference("settings.save_ports", bool(self.save_ports_var.get()))
+        set_preference("settings.save_packets", bool(self.save_packets_var.get()))
+        set_preference("settings.save_intel", bool(self.save_intel_var.get()))
+        set_preference("settings.save_ai", bool(self.save_ai_var.get()))
+        self._log("Settings saved.")
+
+    def clear_db_logs(self) -> None:
+        import sqlite3
+
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM scan_history")
+        self._log("Database scan history cleared.")
+
+    def clear_prompt_prefs(self) -> None:
+        set_preference("prompt.port_scan", "")
+        set_preference("prompt.packet_scan", "")
+        self.prompt_templates["Port Scan"] = build_analyst_prompt()
+        self.prompt_templates["Packet Scan"] = build_network_engine_prompt()
+        self._load_prompt_editor_text()
+        self._log("Prompt preferences reset to defaults.")
+
+    def save_logs_to_db(self, source: str) -> None:
+        summary: dict[str, object] = {"source": source, "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        if self.save_ports_var.get():
+            summary["port_rows"] = len(self.scan_results)
+        if self.save_packets_var.get():
+            summary["packet_rows"] = len(self.packet_service.get_packets(limit=PACKET_SLICE_LIMIT))
+        if self.save_intel_var.get():
+            summary["intel_mode"] = self.firewall_status_var.get()
+        if self.save_ai_var.get():
+            summary["ai_status"] = self.ai_status_var.get() if hasattr(self, "ai_status_var") else "n/a"
+        record_scan_history(source, summary)
+        self._log(f"Saved selected log categories to DB from {source}.")
+
     def _rows_for_ai_analysis(self) -> list[dict[str, str | int | list[str]]]:
         rows = list(self._scan_rows_for_reporting())
+        if self.ai_data_type_var.get() == "Packet Scan":
+            rows = self.packet_service.get_packets(limit=PACKET_SLICE_LIMIT)
+
+        if self.ai_log_source_var.get() == "External File":
+            path = self.ai_external_log_path_var.get().strip()
+            if path and os.path.exists(path):
+                try:
+                    import json
+                    with open(path, "r", encoding="utf-8") as handle:
+                        loaded = json.load(handle)
+                    if isinstance(loaded, list):
+                        rows = loaded
+                except Exception as exc:  # noqa: BLE001
+                    self._log(f"Failed to parse external file: {exc}")
         filtered: list[dict[str, str | int | list[str]]] = []
         for row in rows:
             risk = str(row.get("risk", "")).lower()
@@ -2258,6 +2594,8 @@ class NetScouterApp(ctk.CTk):
             filter_model=filter_model,
             progress_callback=lambda pct, msg: self.after(0, lambda p=pct, m=msg: self._set_ai_progress(p, m)),
             cancel_event=self.ai_cancel_event,
+            analyst_prompt_override=self.prompt_templates.get("Port Scan"),
+            network_prompt_override=self.prompt_templates.get("Packet Scan"),
         )
 
         def publish() -> None:
