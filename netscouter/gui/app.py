@@ -243,6 +243,7 @@ class NetScouterApp(ctk.CTk):
         self.save_packets_var = ctk.BooleanVar(value=True)
         self.save_intel_var = ctk.BooleanVar(value=False)
         self.save_ai_var = ctk.BooleanVar(value=False)
+        self.settings_save_feedback_var = ctk.StringVar(value="")
         self.local_info_visible = False
 
         self._configure_grid()
@@ -347,9 +348,9 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkFrame(shell, width=5, fg_color=accent).pack(side="left", fill="y")
         content = ctk.CTkFrame(shell, fg_color=bg)
         content.pack(side="left", fill="both", expand=True, padx=(8, 6), pady=4)
-        close_btn = ctk.CTkButton(content, text="X", width=26, fg_color=STOP_RED, hover_color=STOP_RED_HOVER, command=popup.destroy)
-        close_btn.pack(anchor="ne")
-        ctk.CTkLabel(content, text="NetScouter - Notification", text_color=fg, font=ctk.CTkFont(family="Roboto Medium", size=12, weight="bold"), anchor="w").pack(fill="x", padx=2)
+        ctk.CTkLabel(content, text="NetScouter - Notification", text_color=fg, font=ctk.CTkFont(family="Roboto Medium", size=12, weight="bold"), anchor="w").pack(fill="x", padx=2, pady=(0,1))
+        close_btn = ctk.CTkButton(content, text="X", width=13, height=13, fg_color=STOP_RED, hover_color=STOP_RED_HOVER, command=popup.destroy)
+        close_btn.place(relx=1.0, x=-2, y=2, anchor="ne")
         body = ctk.CTkLabel(content, text=message, text_color=fg, justify="left", anchor="w", wraplength=320, font=ctk.CTkFont(family="Roboto Medium", size=12))
         body.pack(fill="both", expand=True, padx=2, pady=(4, 6))
 
@@ -383,7 +384,7 @@ class NetScouterApp(ctk.CTk):
 
         self.tab_buttons: dict[str, ctk.CTkButton] = {}
         self.workspace_panes: dict[str, ctk.CTkFrame] = {}
-        tabs = ["Dashboard", "Packet Filtering", "Possible Threats", "Intelligence", "AI Auditor", "Operations", "Settings"]
+        tabs = ["Dashboard", "Packet Filtering", "Intelligence", "AI Auditor", "Operations", "Possible Threats", "Settings"]
         for index, name in enumerate(tabs, start=1):
             button = ctk.CTkButton(
                 left_bar,
@@ -477,7 +478,7 @@ class NetScouterApp(ctk.CTk):
 
     def _build_intelligence_tab(self, pane: ctk.CTkFrame) -> None:
         pane.grid_columnconfigure(0, weight=1)
-        pane.grid_rowconfigure(4, weight=1)
+        pane.grid_rowconfigure(8, weight=1)
 
         guide = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         guide.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
@@ -590,45 +591,58 @@ class NetScouterApp(ctk.CTk):
         self.lan_table.bind("<Button-3>", self._open_lan_context_menu)
 
         ops_actions = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
-        ops_actions.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
+        ops_actions.grid(row=6, column=0, sticky="ew", padx=8, pady=(0, 8))
         ctk.CTkButton(ops_actions, text="Export AI Audit", corner_radius=10, command=self.export_ai_audit, width=140).grid(row=0, column=0, padx=8, pady=10)
         ctk.CTkButton(ops_actions, text="Export XLSX", corner_radius=10, command=self.export_xlsx, width=120).grid(row=0, column=1, padx=8, pady=10)
 
     def _build_settings_tab(self, pane: ctk.CTkFrame) -> None:
         pane.grid_columnconfigure(0, weight=1)
-        pane.grid_rowconfigure(4, weight=1)
+        pane.grid_rowconfigure(8, weight=1)
+
+        dashboard_label = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        dashboard_label.grid(row=0, column=0, sticky="ew", padx=8, pady=(10, 5))
+        ctk.CTkLabel(dashboard_label, text="Dashboard Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
 
         dashboard_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
-        dashboard_card.grid(row=0, column=0, sticky="ew", padx=8, pady=(10, 10))
-        ctk.CTkLabel(dashboard_card, text="Dashboard Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+        dashboard_card.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 10))
         ctk.CTkEntry(dashboard_card, textvariable=self.target_var, width=180, placeholder_text="Persistent target IP/hostname").grid(row=0, column=1, padx=6, pady=6)
         ctk.CTkEntry(dashboard_card, textvariable=self.port_range_var, width=120, placeholder_text="Persistent port range").grid(row=0, column=2, padx=6, pady=6)
         ctk.CTkOptionMenu(dashboard_card, values=["Layman", "Expert"], variable=self.log_detail_mode_var, width=110).grid(row=0, column=3, padx=6, pady=6)
         ctk.CTkCheckBox(dashboard_card, text="Popup notifications", variable=self.popup_notifications_var).grid(row=0, column=4, padx=6, pady=6)
 
+        packet_label = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        packet_label.grid(row=2, column=0, sticky="ew", padx=8, pady=(5, 5))
+        ctk.CTkLabel(packet_label, text="Packet Filtering Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+
         packet_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
-        packet_card.grid(row=1, column=0, sticky="ew", padx=8, pady=(5, 5))
-        ctk.CTkLabel(packet_card, text="Packet Filtering Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+        packet_card.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 10))
         ctk.CTkCheckBox(packet_card, text="Save Port Scan logs", variable=self.save_ports_var).grid(row=0, column=1, padx=6, pady=6)
         ctk.CTkCheckBox(packet_card, text="Save Packet logs", variable=self.save_packets_var).grid(row=0, column=2, padx=6, pady=6)
         ctk.CTkCheckBox(packet_card, text="Save Intel events", variable=self.save_intel_var).grid(row=0, column=3, padx=6, pady=6)
         ctk.CTkCheckBox(packet_card, text="Save AI output", variable=self.save_ai_var).grid(row=0, column=4, padx=6, pady=6)
 
+        intel_label = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        intel_label.grid(row=4, column=0, sticky="ew", padx=8, pady=(5, 5))
+        ctk.CTkLabel(intel_label, text="Intelligence/API Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+
         intel_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
-        intel_card.grid(row=2, column=0, sticky="ew", padx=8, pady=(5, 5))
-        ctk.CTkLabel(intel_card, text="Intelligence/API Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
-        ctk.CTkEntry(intel_card, textvariable=self.abuseipdb_key_var, width=220, placeholder_text="AbuseIPDB API key").grid(row=0, column=1, padx=6, pady=6)
+        intel_card.grid(row=5, column=0, sticky="ew", padx=8, pady=(0, 10))
+        ctk.CTkEntry(intel_card, textvariable=self.shodan_key_var, width=220, placeholder_text="Shodan API key").grid(row=0, column=1, padx=6, pady=6)
         ctk.CTkEntry(intel_card, textvariable=self.virustotal_key_var, width=220, placeholder_text="VirusTotal API key").grid(row=0, column=2, padx=6, pady=6)
         ctk.CTkEntry(intel_card, textvariable=self.otx_key_var, width=220, placeholder_text="AlienVault OTX key").grid(row=0, column=3, padx=6, pady=6)
         ctk.CTkButton(intel_card, text="Apply Intel Keys", width=130, command=self.apply_settings).grid(row=0, column=4, padx=6, pady=6)
 
+        ai_label = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        ai_label.grid(row=6, column=0, sticky="ew", padx=8, pady=(5, 5))
+        ctk.CTkLabel(ai_label, text="AI Auditor/Database", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+
         ai_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
-        ai_card.grid(row=3, column=0, sticky="ew", padx=8, pady=(5, 10))
-        ctk.CTkLabel(ai_card, text="AI Auditor/Database", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
-        ctk.CTkButton(ai_card, text="Save All Settings", width=150, command=self.save_settings_preferences, fg_color="#0F766E", hover_color="#115E59").grid(row=0, column=4, padx=6, pady=6, sticky="e")
-        ctk.CTkButton(ai_card, text="Clear DB Logs", width=130, command=self.clear_db_logs, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=2, padx=6, pady=6)
-        ctk.CTkButton(ai_card, text="Clear Prompt Prefs", width=150, command=self.clear_prompt_prefs, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=3, padx=6, pady=6)
-        ctk.CTkLabel(ai_card, text="Use Save All Settings to persist every option above.", anchor="w").grid(row=1, column=0, columnspan=5, padx=10, pady=(0,6), sticky="w")
+        ai_card.grid(row=7, column=0, sticky="ew", padx=8, pady=(0, 10))
+        ctk.CTkButton(ai_card, text="Clear DB Logs", width=130, command=self.clear_db_logs, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=0, padx=6, pady=6)
+        ctk.CTkButton(ai_card, text="Clear Prompt Prefs", width=150, command=self.clear_prompt_prefs, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkButton(ai_card, text="Save All Settings", width=150, command=self.save_settings_preferences, fg_color="#0F766E", hover_color="#115E59").grid(row=0, column=2, padx=(16, 6), pady=6)
+        ctk.CTkLabel(ai_card, textvariable=self.settings_save_feedback_var, anchor="w").grid(row=0, column=3, padx=(4, 6), pady=6, sticky="w")
+        ctk.CTkLabel(ai_card, text="Use Save All Settings to persist every option above.", anchor="w").grid(row=1, column=0, columnspan=4, padx=10, pady=(0, 6), sticky="w")
 
     def _build_possible_threats_tab(self, pane: ctk.CTkFrame) -> None:
         pane.grid_columnconfigure(0, weight=1)
@@ -1936,7 +1950,7 @@ class NetScouterApp(ctk.CTk):
             )
             self._dispatch_packet_event(packet)
         self.packet_stream_console.delete("1.0", "end")
-        self.packet_stream_console.insert("1.0", "\n\n".join(lines))
+        self.packet_stream_console.insert("1.0", "\n \n".join(lines))
 
         alert_target = remote_ip if remote_ip else "local-network"
         alerts = evaluate_packet_signals(alert_target, packets)
@@ -2437,7 +2451,7 @@ class NetScouterApp(ctk.CTk):
     def _packet_log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%S")
         rendered = self._format_log_message(message)
-        self.packet_stream_console.insert("end", f"[{timestamp}] {rendered}\n\n")
+        self.packet_stream_console.insert("end", f"[{timestamp}] {rendered}\n \n")
         self.packet_stream_console.see("end")
         self.packet_log_line_count += 1
         if self.packet_log_line_count > MAX_LOG_LINES:
@@ -2711,6 +2725,15 @@ class NetScouterApp(ctk.CTk):
     def _load_runtime_preferences(self) -> None:
         self.target_var.set(str(get_preference("settings.target", self.target_var.get())))
         self.port_range_var.set(str(get_preference("settings.ports", self.port_range_var.get())))
+        self.abuseipdb_key_var.set(str(get_preference("settings.abuseipdb_key", self.abuseipdb_key_var.get())))
+        self.virustotal_key_var.set(str(get_preference("settings.virustotal_key", self.virustotal_key_var.get())))
+        self.otx_key_var.set(str(get_preference("settings.otx_key", self.otx_key_var.get())))
+        self.reputation_threshold_var.set(str(get_preference("settings.reputation_threshold", self.reputation_threshold_var.get())))
+        self.reputation_timeout_var.set(str(get_preference("settings.reputation_timeout", self.reputation_timeout_var.get())))
+        self.ai_timeout_var.set(str(get_preference("settings.ai_timeout", self.ai_timeout_var.get())))
+        self.automation_enabled_var.set(bool(get_preference("settings.automation_enabled", self.automation_enabled_var.get())))
+        self.automation_threshold_var.set(str(get_preference("settings.automation_threshold", self.automation_threshold_var.get())))
+        self.automation_action_var.set(str(get_preference("settings.automation_action", self.automation_action_var.get())))
         self.log_detail_mode_var.set(str(get_preference("settings.log_mode", self.log_detail_mode_var.get())))
         self.save_ports_var.set(bool(get_preference("settings.save_ports", self.save_ports_var.get())))
         self.save_packets_var.set(bool(get_preference("settings.save_packets", self.save_packets_var.get())))
@@ -2741,6 +2764,15 @@ class NetScouterApp(ctk.CTk):
         set_preference("settings.target", self.target_var.get().strip())
         set_preference("settings.ports", self.port_range_var.get().strip())
         set_preference("settings.log_mode", self.log_detail_mode_var.get())
+        set_preference("settings.abuseipdb_key", self.abuseipdb_key_var.get().strip())
+        set_preference("settings.virustotal_key", self.virustotal_key_var.get().strip())
+        set_preference("settings.otx_key", self.otx_key_var.get().strip())
+        set_preference("settings.reputation_threshold", self.reputation_threshold_var.get().strip())
+        set_preference("settings.reputation_timeout", self.reputation_timeout_var.get().strip())
+        set_preference("settings.ai_timeout", self.ai_timeout_var.get().strip())
+        set_preference("settings.automation_enabled", bool(self.automation_enabled_var.get()))
+        set_preference("settings.automation_threshold", self.automation_threshold_var.get().strip())
+        set_preference("settings.automation_action", self.automation_action_var.get())
         set_preference("settings.save_ports", bool(self.save_ports_var.get()))
         set_preference("settings.save_packets", bool(self.save_packets_var.get()))
         set_preference("settings.save_intel", bool(self.save_intel_var.get()))
@@ -2750,6 +2782,8 @@ class NetScouterApp(ctk.CTk):
         set_preference("settings.automation_points_unassigned", self.automation_points_unassigned_var.get().strip())
         set_preference("settings.automation_points_frequency", self.automation_points_frequency_var.get().strip())
         set_preference("settings.automation_points_dns", self.automation_points_dns_var.get().strip())
+        self.settings_save_feedback_var.set("All settings saved.")
+        self.after(2500, lambda: self.settings_save_feedback_var.set(""))
         self._log("Settings saved.")
 
     def clear_db_logs(self) -> None:
