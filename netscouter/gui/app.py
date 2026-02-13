@@ -669,7 +669,7 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkButton(header, text="Remove Entry", width=104, command=self._threat_remove_selected).grid(row=0, column=7, padx=4, pady=6)
 
         cols = ("timestamp", "ip", "action", "status", "reason", "expires")
-        self.threats_table = ttk.Treeview(pane, columns=cols, show="headings", height=10, selectmode="browse")
+        self.threats_table = ttk.Treeview(pane, columns=cols, show="headings", height=10, selectmode="extended")
         widths = {"timestamp": 165, "ip": 170, "action": 105, "status": 100, "reason": 360, "expires": 150}
         for col in cols:
             self.threats_table.heading(col, text=col.title())
@@ -771,7 +771,7 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkLabel(controls, textvariable=self.packet_stream_status_var).grid(row=1, column=0, columnspan=3, padx=8, pady=(0, 6), sticky="w")
         ctk.CTkLabel(controls, textvariable=self.packet_scope_hint_var).grid(row=1, column=3, columnspan=3, padx=8, pady=(0, 6), sticky="e")
 
-        self.packet_filter_table = ttk.Treeview(pane, columns=("time", "connection", "proto", "risk", "behavior", "process"), show="headings", height=12)
+        self.packet_filter_table = ttk.Treeview(pane, columns=("time", "connection", "proto", "risk", "behavior", "process"), show="headings", height=12, selectmode="extended")
         for col, width in {"time": 180, "connection": 380, "proto": 90, "risk": 90, "behavior": 140, "process": 220}.items():
             self.packet_filter_table.heading(col, text=col.title())
             self.packet_filter_table.column(col, width=width, anchor="center")
@@ -2050,37 +2050,51 @@ class NetScouterApp(ctk.CTk):
         if remote_ip:
             self.selected_remote_ip = remote_ip
 
+    def _selected_packet_ips(self) -> list[str]:
+        selected = list(self.packet_filter_table.selection()) if hasattr(self, "packet_filter_table") else []
+        packets: list[dict[str, object]] = []
+        for item in selected:
+            idx = self.packet_filter_table.index(item)
+            if 0 <= idx < len(self.packet_filtered_packets):
+                packets.append(self.packet_filtered_packets[idx])
+        if not packets and self.packet_selected_packet:
+            packets = [self.packet_selected_packet]
+        ips: list[str] = []
+        for pkt in packets:
+            ip = str(pkt.get("dst") or pkt.get("src") or "").strip()
+            if ip and ip not in ips:
+                ips.append(ip)
+        return ips
+
     def block_selected_packet_ip(self) -> None:
-        if not self.packet_selected_packet:
+        ips = self._selected_packet_ips()
+        if not ips:
             return
-        ip = str(self.packet_selected_packet.get("dst") or self.packet_selected_packet.get("src") or "")
-        if not ip:
-            return
-        result = enforce_ip_policy(ip, action="block")
-        if result.get("success"):
-            self.blocked_packet_ips.add(ip)
-        self._packet_log(f"Block request for {ip}: {result.get('message')}")
+        for ip in ips:
+            result = enforce_ip_policy(ip, action="block")
+            if result.get("success"):
+                self.blocked_packet_ips.add(ip)
+            self._packet_log(f"Block request for {ip}: {result.get('message')}")
 
     def unblock_selected_packet_ip(self) -> None:
-        if not self.packet_selected_packet:
+        ips = self._selected_packet_ips()
+        if not ips:
             return
-        ip = str(self.packet_selected_packet.get("dst") or self.packet_selected_packet.get("src") or "")
-        if not ip:
-            return
-        result = unbanish_ip(ip)
-        if result.get("success") and ip in self.blocked_packet_ips:
-            self.blocked_packet_ips.remove(ip)
-        self._append_threat_event(
-            {
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "ip": ip,
-                "action": "unban",
-                "status": "success" if bool(result.get("success")) else "failed",
-                "reason": str(result.get("message", "")),
-            }
-        )
+        for ip in ips:
+            result = unbanish_ip(ip)
+            if result.get("success") and ip in self.blocked_packet_ips:
+                self.blocked_packet_ips.remove(ip)
+            self._append_threat_event(
+                {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ip": ip,
+                    "action": "unban",
+                    "status": "success" if bool(result.get("success")) else "failed",
+                    "reason": str(result.get("message", "")),
+                }
+            )
+            self._packet_log(f"Unblock request for {ip}: {result.get('message')}")
         self._refresh_threats_table()
-        self._packet_log(f"Unblock request for {ip}: {result.get('message')}")
 
     def _open_packet_filter_context_menu(self, event: object) -> None:
         row_y = getattr(event, "y", 0)
@@ -2345,44 +2359,44 @@ class NetScouterApp(ctk.CTk):
             if button is not None:
                 button.configure(state="normal")
 
-    def banish_selected_ip(self) -> None:
+    def _selected_result_ips(self) -> list[str]:
         selection = self.results_table.selection()
-        if not selection:
-            self._log("Select a row first to banish an IP")
+        ips: list[str] = []
+        for item in selection:
+            values = self.results_table.item(item, "values")
+            ip = str(values[2]) if len(values) > 2 else ""
+            if ip and ip not in ips:
+                ips.append(ip)
+        return ips
+
+    def banish_selected_ip(self) -> None:
+        ips = self._selected_result_ips()
+        if not ips:
+            self._log("Select one or more rows first to banish IPs")
             return
 
-        values = self.results_table.item(selection[0], "values")
-        ip = str(values[2])
-        if not ip:
-            self._log("Selected row has no remote IP")
-            return
-
-        confirm = messagebox.askyesno("Banish IP", f"Block {ip} permanently in firewall?")
+        confirm = messagebox.askyesno("Banish IP", f"Block {len(ips)} selected IP(s) permanently in firewall?")
         if not confirm:
             return
 
-        threading.Thread(target=self._banish_ip_worker, args=(ip,), daemon=True, name="banish-ip").start()
+        for ip in ips:
+            threading.Thread(target=self._banish_ip_worker, args=(ip,), daemon=True, name="banish-ip").start()
 
     def quarantine_selected_ip(self) -> None:
-        selection = self.results_table.selection()
-        if not selection:
-            self._log("Select a row first to quarantine an IP")
-            return
-
-        values = self.results_table.item(selection[0], "values")
-        ip = str(values[2])
-        if not ip:
-            self._log("Selected row has no remote IP")
+        ips = self._selected_result_ips()
+        if not ips:
+            self._log("Select one or more rows first to quarantine IPs")
             return
 
         confirm = messagebox.askyesno(
             "Quarantine IP",
-            f"Redirect {ip} to local sinkhole ({self.honeypot.host}:{self.honeypot.port})?",
+            f"Redirect {len(ips)} selected IP(s) to local sinkhole ({self.honeypot.host}:{self.honeypot.port})?",
         )
         if not confirm:
             return
 
-        threading.Thread(target=self._quarantine_ip_worker, args=(ip,), daemon=True, name="quarantine-ip").start()
+        for ip in ips:
+            threading.Thread(target=self._quarantine_ip_worker, args=(ip,), daemon=True, name="quarantine-ip").start()
 
     def _banish_ip_worker(self, ip: str) -> None:
         try:
@@ -2976,6 +2990,25 @@ class NetScouterApp(ctk.CTk):
             return None
         return self.threat_event_lookup.get(selected[0])
 
+    def _selected_threat_events(self) -> list[dict[str, str | bool]]:
+        if not hasattr(self, "threats_table"):
+            return []
+        selected = self.threats_table.selection()
+        events: list[dict[str, str | bool]] = []
+        for item in selected:
+            event = self.threat_event_lookup.get(item)
+            if isinstance(event, dict):
+                events.append(event)
+        return events
+
+    def _selected_threat_ips(self) -> list[str]:
+        ips: list[str] = []
+        for event in self._selected_threat_events():
+            ip = str(event.get("ip") or "").strip()
+            if ip and ip not in ips:
+                ips.append(ip)
+        return ips
+
     def _on_threat_selected(self, _event: object = None) -> None:
         event = self._selected_threat_event()
         self.selected_threat_event = event
@@ -3114,20 +3147,22 @@ class NetScouterApp(ctk.CTk):
         ]
 
     def _threat_block_selected(self) -> None:
-        ip = self._selected_threat_ip()
-        if not ip:
+        ips = self._selected_threat_ips()
+        if not ips:
             return
-        threading.Thread(target=self._banish_ip_worker, args=(ip,), daemon=True, name="threat-block").start()
+        for ip in ips:
+            threading.Thread(target=self._banish_ip_worker, args=(ip,), daemon=True, name="threat-block").start()
 
     def _threat_quarantine_selected(self) -> None:
-        ip = self._selected_threat_ip()
-        if not ip:
+        ips = self._selected_threat_ips()
+        if not ips:
             return
-        threading.Thread(target=self._quarantine_ip_worker, args=(ip,), daemon=True, name="threat-quarantine").start()
+        for ip in ips:
+            threading.Thread(target=self._quarantine_ip_worker, args=(ip,), daemon=True, name="threat-quarantine").start()
 
     def _threat_temp_ban_selected(self) -> None:
-        ip = self._selected_threat_ip()
-        if not ip:
+        ips = self._selected_threat_ips()
+        if not ips:
             return
         dialog = ctk.CTkInputDialog(text="Temporary ban duration (minutes)", title="Temp Ban")
         value = (dialog.get_input() or "").strip()
@@ -3136,28 +3171,29 @@ class NetScouterApp(ctk.CTk):
         except ValueError:
             minutes = 15
         expires = datetime.now().timestamp() + minutes * 60
-        threading.Thread(target=self._banish_ip_worker, args=(ip,), daemon=True, name="threat-temp-ban").start()
+        for ip in ips:
+            threading.Thread(target=self._banish_ip_worker, args=(ip,), daemon=True, name="threat-temp-ban").start()
 
-        existing = self.temp_ban_timers.pop(ip, None)
-        if existing:
-            existing.cancel()
+            existing = self.temp_ban_timers.pop(ip, None)
+            if existing:
+                existing.cancel()
 
-        timer = threading.Timer(minutes * 60, lambda: self.after(0, lambda: self._expire_temp_ban(ip)))
-        timer.daemon = True
-        timer.start()
-        self.temp_ban_timers[ip] = timer
-        self._append_threat_event(
-            {
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "ip": ip,
-                "action": "temp_ban",
-                "status": "scheduled",
-                "reason": f"Temporary ban scheduled for {minutes} minute(s)",
-                "expires_at": datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M:%S"),
-            }
-        )
+            timer = threading.Timer(minutes * 60, lambda ip=ip: self.after(0, lambda: self._expire_temp_ban(ip)))
+            timer.daemon = True
+            timer.start()
+            self.temp_ban_timers[ip] = timer
+            self._append_threat_event(
+                {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ip": ip,
+                    "action": "temp_ban",
+                    "status": "scheduled",
+                    "reason": f"Temporary ban scheduled for {minutes} minute(s)",
+                    "expires_at": datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
         self._refresh_threats_table()
-        self._log(f"Temporary ban armed for {ip}: {minutes} minute(s).")
+        self._log(f"Temporary ban armed for {len(ips)} IP(s): {minutes} minute(s).")
 
     def _expire_temp_ban(self, ip: str) -> None:
         self.temp_ban_timers.pop(ip, None)
@@ -3175,39 +3211,41 @@ class NetScouterApp(ctk.CTk):
         self._notify_popup(f"Temporary ban expired for {ip}", tab="Possible Threats")
 
     def _threat_unban_watch_selected(self) -> None:
-        ip = self._selected_threat_ip()
-        if not ip:
+        ips = self._selected_threat_ips()
+        if not ips:
             return
-        result = unbanish_ip(ip)
-        self.packet_watchlist.add(ip)
-        self._append_threat_event(
-            {
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "ip": ip,
-                "action": "unban_watch",
-                "status": "success" if bool(result.get("success")) else "failed",
-                "reason": f"{result.get('message', '')} | Added to watchlist for follow-up",
-            }
-        )
+        for ip in ips:
+            result = unbanish_ip(ip)
+            self.packet_watchlist.add(ip)
+            self._append_threat_event(
+                {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ip": ip,
+                    "action": "unban_watch",
+                    "status": "success" if bool(result.get("success")) else "failed",
+                    "reason": f"{result.get('message', '')} | Added to watchlist for follow-up",
+                }
+            )
         self._refresh_threats_table()
-        self._log(f"Unban + Watch for {ip}: {result.get('message')}")
+        self._log(f"Unban + Watch completed for {len(ips)} IP(s).")
 
     def _threat_unban_selected(self) -> None:
-        ip = self._selected_threat_ip()
-        if not ip:
+        ips = self._selected_threat_ips()
+        if not ips:
             return
-        result = unbanish_ip(ip)
-        self._append_threat_event(
-            {
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "ip": ip,
-                "action": "unban",
-                "status": "success" if bool(result.get("success")) else "failed",
-                "reason": str(result.get("message", "")),
-            }
-        )
+        for ip in ips:
+            result = unbanish_ip(ip)
+            self._append_threat_event(
+                {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ip": ip,
+                    "action": "unban",
+                    "status": "success" if bool(result.get("success")) else "failed",
+                    "reason": str(result.get("message", "")),
+                }
+            )
         self._refresh_threats_table()
-        self._log(f"Threat list unban {ip}: {result.get('message')}")
+        self._log(f"Threat list unban completed for {len(ips)} IP(s).")
 
     def _persist_threat_events(self) -> None:
         try:
@@ -3216,16 +3254,21 @@ class NetScouterApp(ctk.CTk):
             self._log(f"Threat DB rewrite failed: {exc}")
 
     def _threat_remove_selected(self) -> None:
-        event = self._selected_threat_event()
-        if not event:
+        events = self._selected_threat_events()
+        if not events:
             return
-        if event in self.threat_events:
-            self.threat_events.remove(event)
+        removed = 0
+        for event in events:
+            if event in self.threat_events:
+                self.threat_events.remove(event)
+                removed += 1
+        if removed == 0:
+            return
         self._persist_threat_events()
         self._refresh_threats_table()
         self.threat_timeline_box.delete("1.0", "end")
         self.threat_detail_box.delete("1.0", "end")
-        self.threat_action_hint_var.set("Threat entry removed from table and database history.")
+        self.threat_action_hint_var.set(f"Removed {removed} threat entr{'y' if removed == 1 else 'ies'} from table and database history.")
 
     def _rows_for_ai_analysis(self) -> list[dict[str, str | int | list[str]]]:
         rows = list(self._scan_rows_for_reporting())
