@@ -5,11 +5,14 @@ from __future__ import annotations
 import ipaddress
 import platform
 import re
+import shutil
 import socket
 import subprocess
 from typing import Any
 
 from .quarantine import build_quarantine_plan
+
+IPSET_BLOCKLIST_NAME = "NetScouter_Banish_List"
 
 
 def detect_os() -> str:
@@ -573,6 +576,21 @@ def banish_ip(ip: str) -> dict[str, Any]:
         }
 
     if os_name == "linux":
+        if shutil.which("ipset") and shutil.which("iptables"):
+            create_set = _run_command(["ipset", "create", IPSET_BLOCKLIST_NAME, "hash:ip", "-exist"])
+            add_ip = _run_command(["ipset", "add", IPSET_BLOCKLIST_NAME, clean_ip, "-exist"])
+            rule = _run_command(["iptables", "-C", "INPUT", "-m", "set", "--match-set", IPSET_BLOCKLIST_NAME, "src", "-j", "DROP"])
+            if not rule.get("success", False):
+                rule = _run_command(["iptables", "-I", "INPUT", "-m", "set", "--match-set", IPSET_BLOCKLIST_NAME, "src", "-j", "DROP"])
+            success = create_set.get("success", False) and add_ip.get("success", False) and rule.get("success", False)
+            return {
+                "success": success,
+                "platform": os_name,
+                "ip": clean_ip,
+                "message": "ipset banish rule applied." if success else "Failed to apply ipset-based block.",
+                "result": {"create": create_set, "add": add_ip, "rule": rule},
+            }
+
         ufw = _run_command(["ufw", "deny", "from", clean_ip])
         if ufw["success"]:
             return {
@@ -631,6 +649,53 @@ def banish_ip(ip: str) -> dict[str, Any]:
         "ip": clean_ip,
         "error": "unsupported_platform",
         "message": "IP blocking is unsupported on this operating system.",
+    }
+
+
+def unbanish_ip(ip: str) -> dict[str, Any]:
+    """Remove firewall rules that block traffic for the provided IP address."""
+    validated = _validate_ip(ip)
+    if validated is None or not validated["success"]:
+        return validated or {"success": False, "error": "invalid_ip", "message": "Invalid IP address."}
+
+    clean_ip = validated["ip"]
+    os_name = detect_os()
+
+    if os_name == "windows":
+        inbound = _run_command(["netsh", "advfirewall", "firewall", "delete", "rule", f"name=NetScouter Block {clean_ip} Inbound"])
+        outbound = _run_command(["netsh", "advfirewall", "firewall", "delete", "rule", f"name=NetScouter Block {clean_ip} Outbound"])
+        return {
+            "success": inbound.get("success", False) and outbound.get("success", False),
+            "platform": os_name,
+            "ip": clean_ip,
+            "results": {"inbound": inbound, "outbound": outbound},
+            "message": "Firewall unblock rules removed." if inbound.get("success", False) and outbound.get("success", False) else "Failed to remove one or more Windows unblock rules.",
+        }
+
+    if os_name == "linux":
+        if shutil.which("ipset"):
+            remove_ip = _run_command(["ipset", "del", IPSET_BLOCKLIST_NAME, clean_ip])
+            if remove_ip.get("success", False):
+                return {"success": True, "platform": os_name, "ip": clean_ip, "message": "Removed IP from ipset blocklist.", "result": remove_ip}
+
+        ufw = _run_command(["ufw", "--force", "delete", "deny", "from", clean_ip])
+        if ufw.get("success", False):
+            return {"success": True, "platform": os_name, "ip": clean_ip, "message": "UFW deny rule removed.", "result": ufw}
+        iptables = _run_command(["iptables", "-D", "INPUT", "-s", clean_ip, "-j", "DROP"])
+        return {
+            "success": iptables.get("success", False),
+            "platform": os_name,
+            "ip": clean_ip,
+            "message": "iptables fallback delete applied." if iptables.get("success", False) else "Failed to remove deny rule.",
+            "result": iptables,
+        }
+
+    return {
+        "success": False,
+        "platform": os_name,
+        "ip": clean_ip,
+        "error": "unsupported_platform",
+        "message": "Unblock is unsupported on this operating system.",
     }
 
 
