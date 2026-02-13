@@ -53,6 +53,8 @@ class ScanJob:
 
 def _probe_tcp_port(host: str, port: int, timeout: float) -> ScanResult:
     """Attempt a TCP connect and return open/closed state."""
+    if port < 0 or port > 65535:
+        return ScanResult(host=host, port=port, is_open=False, error="invalid-port")
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)
@@ -176,10 +178,13 @@ def scan_targets(
                         break
 
                     future = pool.submit(_probe_tcp_port, target, int(port), timeout)
-                    def _queue_result(fut, target_host: str = target) -> None:  # type: ignore[no-untyped-def]
+                    def _queue_result(fut, target_host: str = target, port_value: int = int(port)) -> None:  # type: ignore[no-untyped-def]
                         if stop_event.is_set():
                             return
-                        result = fut.result()
+                        try:
+                            result = fut.result()
+                        except Exception as exc:  # noqa: BLE001
+                            result = ScanResult(host=target_host, port=port_value, is_open=False, error=str(exc))
                         if target_process_map:
                             process_meta = target_process_map.get(target_host, {})
                             result.pid = int(process_meta.get("pid")) if process_meta.get("pid") else None
@@ -195,7 +200,10 @@ def scan_targets(
                 if stop_event.is_set():
                     future.cancel()
                     continue
-                future.result()
+                try:
+                    future.result()
+                except Exception:
+                    continue
 
         result_queue.put(None)
 
