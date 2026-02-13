@@ -61,7 +61,7 @@ from netscouter.scanner.honeypot import LocalHoneypot
 from netscouter.scanner.packet_stream import PacketCaptureService, derive_lan_cidr
 from netscouter.scanner.lan_mapper import DeviceRegistry, correlate_iot_outbound_anomalies, discover_lan_devices
 from netscouter.scheduler.jobs import get_schedule_events, log_schedule_event
-from netscouter.storage import get_preference, record_scan_history, set_preference
+from netscouter.storage import get_preference, list_threat_events, record_scan_history, record_threat_event, set_preference
 from netscouter.storage.preferences import DB_PATH
 
 DARK_THEME = {
@@ -254,6 +254,8 @@ class NetScouterApp(ctk.CTk):
         self._build_layout()
         self._load_saved_prompt_templates()
         self._load_runtime_preferences()
+        self._load_threat_events_from_db()
+        self._refresh_threats_table()
         self._apply_theme()
         self.after(80, self._maximize_window)
 
@@ -688,7 +690,8 @@ class NetScouterApp(ctk.CTk):
         self.threat_timeline_box.grid(row=1, column=0, sticky="nsew", padx=(10, 6), pady=(0, 8))
         self.threat_detail_box = ctk.CTkTextbox(bottom, corner_radius=10)
         self.threat_detail_box.grid(row=1, column=1, sticky="nsew", padx=(6, 10), pady=(0, 8))
-        ctk.CTkLabel(bottom, textvariable=self.threat_action_hint_var, anchor="w").grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
+        ctk.CTkButton(bottom, text="⧉ Copy Threat Detail", width=150, command=self._copy_threat_detail).grid(row=2, column=1, sticky="e", padx=10, pady=(0, 4))
+        ctk.CTkLabel(bottom, textvariable=self.threat_action_hint_var, anchor="w").grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
 
     def _build_results_table(self, parent: ctk.CTkFrame, row: int) -> None:
         self.table_card = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
@@ -2064,7 +2067,7 @@ class NetScouterApp(ctk.CTk):
         result = unbanish_ip(ip)
         if result.get("success") and ip in self.blocked_packet_ips:
             self.blocked_packet_ips.remove(ip)
-        self.threat_events.append(
+        self._append_threat_event(
             {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "ip": ip,
@@ -2390,7 +2393,7 @@ class NetScouterApp(ctk.CTk):
         if result.get("success"):
             self.after(0, lambda: self._apply_containment_state(ip, "Blocked"))
             self.after(0, lambda: self._notify_popup(f"Blocked {ip} by firewall policy", tab="Intelligence"))
-        self.threat_events.append(
+        self._append_threat_event(
             {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "ip": ip,
@@ -2423,7 +2426,7 @@ class NetScouterApp(ctk.CTk):
             "success": bool(result.get("success")),
         }
         self.quarantine_events.append(event)
-        self.threat_events.append(
+        self._append_threat_event(
             {
                 "timestamp": str(event.get("timestamp", "")),
                 "ip": ip,
@@ -2837,12 +2840,29 @@ class NetScouterApp(ctk.CTk):
         record_scan_history(source, summary)
         self._log(f"Saved selected log categories to DB from {source}.")
 
+    def _load_threat_events_from_db(self) -> None:
+        try:
+            loaded = list_threat_events(limit=1000)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Threat history DB load failed: {exc}")
+            return
+        if loaded:
+            self.threat_events = [event for event in loaded if isinstance(event, dict)]
+
+    def _append_threat_event(self, event: dict[str, str | bool]) -> None:
+        event.setdefault("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        self.threat_events.append(event)
+        try:
+            record_threat_event(event)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Threat DB save failed: {exc}")
+
     def _refresh_threats_table(self) -> None:
         if not hasattr(self, "threats_table"):
             return
         self.threats_table.delete(*self.threats_table.get_children())
         self.threat_event_lookup = {}
-        events = self.threat_events[-400:]
+        events = self.threat_events[-600:]
         for idx, event in enumerate(events):
             iid = f"threat-{idx}"
             self.threat_event_lookup[iid] = event
@@ -2895,6 +2915,16 @@ class NetScouterApp(ctk.CTk):
         self.threat_detail_box.insert("1.0", "\n".join(detail_lines))
         self.threat_action_hint_var.set("Safety actions: use Temp Ban for reversible containment, or Unban + Watch for likely false positives.")
 
+    def _copy_threat_detail(self) -> None:
+        if not hasattr(self, "threat_detail_box"):
+            return
+        text = self.threat_detail_box.get("1.0", "end").strip()
+        if not text:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.threat_action_hint_var.set("Threat detail copied to clipboard.")
+
     def _build_threat_detail_lines(self, event: dict[str, str | bool]) -> list[str]:
         ip = str(event.get("ip") or "").strip()
         packet_hits = [p for p in self.packet_service.get_packets(limit=PACKET_SLICE_LIMIT) if str(p.get("dst") or "") == ip or str(p.get("src") or "") == ip]
@@ -2915,6 +2945,48 @@ class NetScouterApp(ctk.CTk):
         if not explain:
             explain.append("Triggered by automation/manual operator action; inspect timeline for sequence")
 
+        internal_ips: set[str] = set()
+        pids = Counter()
+        process_names = Counter()
+        accessed_ports: set[str] = set()
+        for pkt in packet_hits:
+            src = str(pkt.get("src") or "")
+            dst = str(pkt.get("dst") or "")
+            local_candidate = dst if src == ip else src
+            try:
+                obj = ipaddress.ip_address(local_candidate)
+                if obj.is_private or obj.is_loopback or obj.is_link_local:
+                    internal_ips.add(local_candidate)
+            except ValueError:
+                pass
+            pid = pkt.get("pid")
+            if pid:
+                pids[str(pid)] += 1
+            pname = str(pkt.get("process_name") or "").strip()
+            if pname:
+                process_names[pname] += 1
+            raw = pkt.get("raw", {}) if isinstance(pkt.get("raw"), dict) else {}
+            if src == ip and raw.get("dst_port"):
+                accessed_ports.add(str(raw.get("dst_port")))
+            if dst == ip and raw.get("src_port"):
+                accessed_ports.add(str(raw.get("src_port")))
+
+        for row in scan_rows:
+            pid = row.get("pid")
+            if pid:
+                pids[str(pid)] += 1
+            pname = str(row.get("process_name") or "").strip()
+            if pname:
+                process_names[pname] += 1
+            local_hint = str(row.get("local_ip") or "").strip()
+            if local_hint:
+                internal_ips.add(local_hint)
+
+        top_pid = ", ".join(f"{k}:{v}" for k, v in pids.most_common(3)) or "n/a"
+        top_proc = ", ".join(f"{k}:{v}" for k, v in process_names.most_common(3)) or "n/a"
+        internal_text = ", ".join(sorted(internal_ips)) or self.local_ipv4
+        ports_text = ", ".join(sorted(accessed_ports)) or "n/a"
+
         return [
             f"IP: {ip}",
             f"Last Action: {event.get('action', '')} | Status: {event.get('status', '')}",
@@ -2925,10 +2997,14 @@ class NetScouterApp(ctk.CTk):
             *[f"- {item}" for item in explain],
             "",
             "Observed Activity Snapshot:",
+            f"- Internal network IP(s) accessed: {internal_text}",
+            f"- Attempt count in packet buffer: {len(packet_hits)}",
             f"- Scan rows linked: {len(scan_rows)}",
             f"- Dominant statuses: {top_status}",
-            f"- Packet hits (recent buffer): {len(packet_hits)}",
             f"- Frequent TCP flags: {top_flags}",
+            f"- Local process names: {top_proc}",
+            f"- Process IDs observed: {top_pid}",
+            f"- Accessed port set: {ports_text}",
             f"- Watchlisted: {'yes' if ip in self.packet_watchlist else 'no'}",
             "",
             "Suggested Follow-up:",
@@ -2970,7 +3046,7 @@ class NetScouterApp(ctk.CTk):
         timer.daemon = True
         timer.start()
         self.temp_ban_timers[ip] = timer
-        self.threat_events.append(
+        self._append_threat_event(
             {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "ip": ip,
@@ -2986,7 +3062,7 @@ class NetScouterApp(ctk.CTk):
     def _expire_temp_ban(self, ip: str) -> None:
         self.temp_ban_timers.pop(ip, None)
         result = unbanish_ip(ip)
-        self.threat_events.append(
+        self._append_threat_event(
             {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "ip": ip,
@@ -3004,7 +3080,7 @@ class NetScouterApp(ctk.CTk):
             return
         result = unbanish_ip(ip)
         self.packet_watchlist.add(ip)
-        self.threat_events.append(
+        self._append_threat_event(
             {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "ip": ip,
@@ -3021,7 +3097,7 @@ class NetScouterApp(ctk.CTk):
         if not ip:
             return
         result = unbanish_ip(ip)
-        self.threat_events.append(
+        self._append_threat_event(
             {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "ip": ip,

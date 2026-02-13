@@ -33,6 +33,15 @@ def _connect() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS threat_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
     return conn
 
 
@@ -84,3 +93,30 @@ def list_scan_history(limit: int = 25) -> list[dict[str, Any]]:
             decoded = {"raw": str(summary)}
         history.append({"scan_type": scan_type, "summary": decoded, "created_at": created_at})
     return history
+
+
+def record_threat_event(event: dict[str, Any]) -> None:
+    stamp = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO threat_events(event_json, created_at) VALUES (?, ?)",
+            (json.dumps(event, ensure_ascii=False), stamp),
+        )
+
+
+def list_threat_events(limit: int = 500) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT event_json, created_at FROM threat_events ORDER BY id DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+    events: list[dict[str, Any]] = []
+    for payload, created_at in reversed(rows):
+        try:
+            decoded = json.loads(str(payload))
+            if isinstance(decoded, dict):
+                decoded.setdefault("timestamp", decoded.get("timestamp") or created_at)
+                events.append(decoded)
+        except json.JSONDecodeError:
+            events.append({"timestamp": created_at, "ip": "", "action": "unknown", "status": "failed", "reason": str(payload)})
+    return events
