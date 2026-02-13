@@ -155,6 +155,9 @@ class NetScouterApp(ctk.CTk):
         self.packet_alert_cache: set[str] = set()
         self.quarantine_events: list[dict[str, str | bool]] = []
         self.threat_events: list[dict[str, str | bool]] = []
+        self.threat_event_lookup: dict[str, dict[str, str | bool]] = {}
+        self.selected_threat_event: dict[str, str | bool] | None = None
+        self.temp_ban_timers: dict[str, threading.Timer] = {}
         self.selected_remote_ip: str | None = None
         self.selected_port: int | None = None
         self.local_ipv4 = "n/a"
@@ -244,6 +247,7 @@ class NetScouterApp(ctk.CTk):
         self.save_intel_var = ctk.BooleanVar(value=False)
         self.save_ai_var = ctk.BooleanVar(value=False)
         self.settings_save_feedback_var = ctk.StringVar(value="")
+        self.threat_action_hint_var = ctk.StringVar(value="Select a threat row to inspect evidence and follow-up guidance.")
         self.local_info_visible = False
 
         self._configure_grid()
@@ -647,25 +651,44 @@ class NetScouterApp(ctk.CTk):
     def _build_possible_threats_tab(self, pane: ctk.CTkFrame) -> None:
         pane.grid_columnconfigure(0, weight=1)
         pane.grid_rowconfigure(1, weight=1)
+        pane.grid_rowconfigure(2, weight=1)
 
         header = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 6))
         ctk.CTkLabel(header, text="Possible Threats", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
-        ctk.CTkButton(header, text="Refresh", width=100, command=self._refresh_threats_table).grid(row=0, column=1, padx=6, pady=6)
-        ctk.CTkButton(header, text="Drop/Block IP", width=100, command=self._threat_block_selected).grid(row=0, column=2, padx=6, pady=6)
-        ctk.CTkButton(header, text="Quarantine IP", width=120, command=self._threat_quarantine_selected).grid(row=0, column=3, padx=6, pady=6)
-        ctk.CTkButton(header, text="Unban IP", width=100, command=self._threat_unban_selected).grid(row=0, column=4, padx=6, pady=6)
+        ctk.CTkButton(header, text="Refresh", width=92, command=self._refresh_threats_table).grid(row=0, column=1, padx=4, pady=6)
+        ctk.CTkButton(header, text="Drop/Block IP", width=108, command=self._threat_block_selected).grid(row=0, column=2, padx=4, pady=6)
+        ctk.CTkButton(header, text="Quarantine IP", width=118, command=self._threat_quarantine_selected).grid(row=0, column=3, padx=4, pady=6)
+        ctk.CTkButton(header, text="Temp Ban", width=96, command=self._threat_temp_ban_selected).grid(row=0, column=4, padx=4, pady=6)
+        ctk.CTkButton(header, text="Unban + Watch", width=116, command=self._threat_unban_watch_selected).grid(row=0, column=5, padx=4, pady=6)
+        ctk.CTkButton(header, text="Unban IP", width=92, command=self._threat_unban_selected).grid(row=0, column=6, padx=4, pady=6)
 
-        cols = ("timestamp", "ip", "action", "status", "reason")
-        self.threats_table = ttk.Treeview(pane, columns=cols, show="headings", height=16, selectmode="browse")
-        widths = {"timestamp": 170, "ip": 180, "action": 120, "status": 120, "reason": 420}
+        cols = ("timestamp", "ip", "action", "status", "reason", "expires")
+        self.threats_table = ttk.Treeview(pane, columns=cols, show="headings", height=10, selectmode="browse")
+        widths = {"timestamp": 165, "ip": 170, "action": 105, "status": 100, "reason": 360, "expires": 150}
         for col in cols:
             self.threats_table.heading(col, text=col.title())
             self.threats_table.column(col, width=widths[col], anchor="center")
         y_scroll = ttk.Scrollbar(pane, orient="vertical", command=self.threats_table.yview, style="NetScouter.Vertical.TScrollbar")
         self.threats_table.configure(yscrollcommand=y_scroll.set)
-        self.threats_table.grid(row=1, column=0, sticky="nsew", padx=(8, 0), pady=(0, 8))
-        y_scroll.grid(row=1, column=1, sticky="ns", padx=(0, 8), pady=(0, 8))
+        self.threats_table.grid(row=1, column=0, sticky="nsew", padx=(8, 0), pady=(0, 6))
+        y_scroll.grid(row=1, column=1, sticky="ns", padx=(0, 8), pady=(0, 6))
+        self.threats_table.bind("<<TreeviewSelect>>", self._on_threat_selected)
+
+        bottom = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        bottom.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        bottom.grid_columnconfigure(0, weight=1)
+        bottom.grid_columnconfigure(1, weight=2)
+        bottom.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(bottom, text="Evidence Timeline", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", padx=10, pady=(8, 4))
+        ctk.CTkLabel(bottom, text="Threat Detail", font=ctk.CTkFont(weight="bold")).grid(row=0, column=1, sticky="w", padx=10, pady=(8, 4))
+
+        self.threat_timeline_box = ctk.CTkTextbox(bottom, corner_radius=10)
+        self.threat_timeline_box.grid(row=1, column=0, sticky="nsew", padx=(10, 6), pady=(0, 8))
+        self.threat_detail_box = ctk.CTkTextbox(bottom, corner_radius=10)
+        self.threat_detail_box.grid(row=1, column=1, sticky="nsew", padx=(6, 10), pady=(0, 8))
+        ctk.CTkLabel(bottom, textvariable=self.threat_action_hint_var, anchor="w").grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
 
     def _build_results_table(self, parent: ctk.CTkFrame, row: int) -> None:
         self.table_card = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
@@ -2818,28 +2841,101 @@ class NetScouterApp(ctk.CTk):
         if not hasattr(self, "threats_table"):
             return
         self.threats_table.delete(*self.threats_table.get_children())
-        for idx, event in enumerate(self.threat_events[-400:]):
+        self.threat_event_lookup = {}
+        events = self.threat_events[-400:]
+        for idx, event in enumerate(events):
+            iid = f"threat-{idx}"
+            self.threat_event_lookup[iid] = event
             self.threats_table.insert(
                 "",
                 "end",
-                iid=f"threat-{idx}",
+                iid=iid,
                 values=(
                     event.get("timestamp", ""),
                     event.get("ip", ""),
                     event.get("action", ""),
                     event.get("status", ""),
                     event.get("reason", ""),
+                    event.get("expires_at", ""),
                 ),
             )
 
     def _selected_threat_ip(self) -> str | None:
+        event = self._selected_threat_event()
+        if not event:
+            return None
+        ip = str(event.get("ip") or "").strip()
+        return ip or None
+
+    def _selected_threat_event(self) -> dict[str, str | bool] | None:
         if not hasattr(self, "threats_table"):
             return None
         selected = self.threats_table.selection()
         if not selected:
             return None
-        values = self.threats_table.item(selected[0], "values")
-        return str(values[1]) if len(values) > 1 else None
+        return self.threat_event_lookup.get(selected[0])
+
+    def _on_threat_selected(self, _event: object = None) -> None:
+        event = self._selected_threat_event()
+        self.selected_threat_event = event
+        if not event:
+            return
+        ip = str(event.get("ip") or "").strip()
+        related = [e for e in self.threat_events if str(e.get("ip") or "").strip() == ip][-12:]
+        self.threat_timeline_box.delete("1.0", "end")
+        if related:
+            lines = [
+                f"{e.get('timestamp', '')} | {e.get('action', '')} | {e.get('status', '')} | {e.get('reason', '')}"
+                for e in related
+            ]
+            self.threat_timeline_box.insert("1.0", "\n".join(lines))
+
+        detail_lines = self._build_threat_detail_lines(event)
+        self.threat_detail_box.delete("1.0", "end")
+        self.threat_detail_box.insert("1.0", "\n".join(detail_lines))
+        self.threat_action_hint_var.set("Safety actions: use Temp Ban for reversible containment, or Unban + Watch for likely false positives.")
+
+    def _build_threat_detail_lines(self, event: dict[str, str | bool]) -> list[str]:
+        ip = str(event.get("ip") or "").strip()
+        packet_hits = [p for p in self.packet_service.get_packets(limit=PACKET_SLICE_LIMIT) if str(p.get("dst") or "") == ip or str(p.get("src") or "") == ip]
+        scan_rows = [r for r in self.scan_results if str(r.get("remote_ip") or "") == ip]
+        statuses = Counter(str(r.get("status") or "unknown") for r in scan_rows)
+        top_status = ", ".join(f"{k}:{v}" for k, v in statuses.most_common(3)) or "n/a"
+        flags = Counter(str(p.get("tcp_flags") or "") for p in packet_hits)
+        top_flags = ", ".join(f"{k or 'none'}:{v}" for k, v in flags.most_common(3)) or "n/a"
+        reason_text = str(event.get("reason") or "")
+        explain = []
+        lower = reason_text.lower()
+        if "ipset" in lower or "block" in lower:
+            explain.append("Containment reached firewall-level blocking path")
+        if "quarantine" in lower or "sinkhole" in lower:
+            explain.append("Connection redirected to sinkhole quarantine")
+        if "dns" in lower or "vpn" in lower:
+            explain.append("Intel/routing anomaly indicator contributed")
+        if not explain:
+            explain.append("Triggered by automation/manual operator action; inspect timeline for sequence")
+
+        return [
+            f"IP: {ip}",
+            f"Last Action: {event.get('action', '')} | Status: {event.get('status', '')}",
+            f"Reason: {reason_text}",
+            f"Expires At: {event.get('expires_at', 'n/a')}",
+            "",
+            "Explainability:",
+            *[f"- {item}" for item in explain],
+            "",
+            "Observed Activity Snapshot:",
+            f"- Scan rows linked: {len(scan_rows)}",
+            f"- Dominant statuses: {top_status}",
+            f"- Packet hits (recent buffer): {len(packet_hits)}",
+            f"- Frequent TCP flags: {top_flags}",
+            f"- Watchlisted: {'yes' if ip in self.packet_watchlist else 'no'}",
+            "",
+            "Suggested Follow-up:",
+            "1) Keep temp-ban (15m) if uncertain.",
+            "2) Use Unban + Watch when likely false positive.",
+            "3) Review process attribution in Packet Filtering investigate popup.",
+        ]
 
     def _threat_block_selected(self) -> None:
         ip = self._selected_threat_ip()
@@ -2852,6 +2948,73 @@ class NetScouterApp(ctk.CTk):
         if not ip:
             return
         threading.Thread(target=self._quarantine_ip_worker, args=(ip,), daemon=True, name="threat-quarantine").start()
+
+    def _threat_temp_ban_selected(self) -> None:
+        ip = self._selected_threat_ip()
+        if not ip:
+            return
+        dialog = ctk.CTkInputDialog(text="Temporary ban duration (minutes)", title="Temp Ban")
+        value = (dialog.get_input() or "").strip()
+        try:
+            minutes = max(1, min(240, int(value or "15")))
+        except ValueError:
+            minutes = 15
+        expires = datetime.now().timestamp() + minutes * 60
+        threading.Thread(target=self._banish_ip_worker, args=(ip,), daemon=True, name="threat-temp-ban").start()
+
+        existing = self.temp_ban_timers.pop(ip, None)
+        if existing:
+            existing.cancel()
+
+        timer = threading.Timer(minutes * 60, lambda: self.after(0, lambda: self._expire_temp_ban(ip)))
+        timer.daemon = True
+        timer.start()
+        self.temp_ban_timers[ip] = timer
+        self.threat_events.append(
+            {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ip": ip,
+                "action": "temp_ban",
+                "status": "scheduled",
+                "reason": f"Temporary ban scheduled for {minutes} minute(s)",
+                "expires_at": datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        self._refresh_threats_table()
+        self._log(f"Temporary ban armed for {ip}: {minutes} minute(s).")
+
+    def _expire_temp_ban(self, ip: str) -> None:
+        self.temp_ban_timers.pop(ip, None)
+        result = unbanish_ip(ip)
+        self.threat_events.append(
+            {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ip": ip,
+                "action": "temp_unban",
+                "status": "success" if bool(result.get("success")) else "failed",
+                "reason": str(result.get("message", "Temporary ban expired")),
+            }
+        )
+        self._refresh_threats_table()
+        self._notify_popup(f"Temporary ban expired for {ip}", tab="Possible Threats")
+
+    def _threat_unban_watch_selected(self) -> None:
+        ip = self._selected_threat_ip()
+        if not ip:
+            return
+        result = unbanish_ip(ip)
+        self.packet_watchlist.add(ip)
+        self.threat_events.append(
+            {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ip": ip,
+                "action": "unban_watch",
+                "status": "success" if bool(result.get("success")) else "failed",
+                "reason": f"{result.get('message', '')} | Added to watchlist for follow-up",
+            }
+        )
+        self._refresh_threats_table()
+        self._log(f"Unban + Watch for {ip}: {result.get('message')}")
 
     def _threat_unban_selected(self) -> None:
         ip = self._selected_threat_ip()
@@ -3065,6 +3228,9 @@ class NetScouterApp(ctk.CTk):
             self.packet_alert_stop.set()
         if hasattr(self, "packet_alert_proc") and self.packet_alert_proc.is_alive():
             self.packet_alert_proc.join(timeout=0.8)
+        for timer in self.temp_ban_timers.values():
+            timer.cancel()
+        self.temp_ban_timers.clear()
         if getattr(self, "_tray_started", False) and hasattr(self, "_tray_icon"):
             self._tray_icon.stop()
         self.intel_executor.shutdown(wait=False, cancel_futures=True)
