@@ -144,7 +144,7 @@ def _ping_host(ip: str, timeout_seconds: float = 0.25) -> bool:
     else:
         cmd = ["ping", "-c", "1", "-W", str(max(1, int(timeout_seconds))), ip]
 
-    proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    proc = subprocess.run(cmd, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return proc.returncode == 0
 
 
@@ -164,7 +164,7 @@ def _read_arp_table() -> dict[str, str]:
     commands: list[list[str]] = [["ip", "neigh", "show"], ["arp", "-a"]]
     for cmd in commands:
         try:
-            proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+            proc = subprocess.run(cmd, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
         except OSError:
             continue
         if proc.returncode != 0 and not proc.stdout:
