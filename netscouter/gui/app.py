@@ -217,6 +217,12 @@ class NetScouterApp(ctk.CTk):
         self.automation_action_var = ctk.StringVar(value="banish")
         self.automation_triggered_ips: set[str] = set()
         self.automation_scoreboard: dict[str, dict[str, object]] = {}
+        self.automation_scope_var = ctk.StringVar(value="All Connections")
+        self.automation_points_unassigned_var = ctk.StringVar(value="20")
+        self.automation_points_frequency_var = ctk.StringVar(value="50")
+        self.automation_points_dns_var = ctk.StringVar(value="30")
+        self.automation_dns_cache: dict[str, bool] = {}
+        self.automation_dns_pending: set[str] = set()
         self.popup_notifications_var = ctk.BooleanVar(value=True)
         self.packet_stream_mode_var = ctk.StringVar(value="Selected Row")
         self.packet_scope_hint_var = ctk.StringVar(value="Scope: select a row or set target host")
@@ -309,7 +315,7 @@ class NetScouterApp(ctk.CTk):
             except Exception:
                 break
             ip = str(event.get("ip") or "")
-            points = int(event.get("points") or 0)
+            points = self._automation_points("frequency") if int(event.get("points") or 0) > 0 else 0
             reason = str(event.get("reason") or "")
             if ip:
                 self._update_behavioral_score(ip, points, reason)
@@ -519,7 +525,13 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkEntry(automation_card, width=70, textvariable=self.automation_threshold_var, placeholder_text="80").grid(row=0, column=3, padx=4, pady=6)
         ctk.CTkLabel(automation_card, text="Action").grid(row=0, column=4, padx=(12, 4), pady=6)
         ctk.CTkOptionMenu(automation_card, values=["quarantine", "banish"], variable=self.automation_action_var, width=120).grid(row=0, column=5, padx=4, pady=6)
-        ctk.CTkLabel(automation_card, text="Scoring: Unassigned port +20 | >10 hits/sec +50 | DNS fail/VPN +30", anchor="w").grid(row=1, column=0, columnspan=6, padx=10, pady=(0,6), sticky="w")
+        ctk.CTkOptionMenu(automation_card, values=["All Connections", "Open Ports Only", "Established Only"], variable=self.automation_scope_var, width=150).grid(row=0, column=6, padx=4, pady=6)
+        ctk.CTkLabel(automation_card, text="Pts: unassigned").grid(row=1, column=0, padx=(10,4), pady=(0,6), sticky="w")
+        ctk.CTkEntry(automation_card, width=55, textvariable=self.automation_points_unassigned_var, placeholder_text="20").grid(row=1, column=1, padx=4, pady=(0,6), sticky="w")
+        ctk.CTkLabel(automation_card, text="freq").grid(row=1, column=2, padx=(10,4), pady=(0,6), sticky="w")
+        ctk.CTkEntry(automation_card, width=55, textvariable=self.automation_points_frequency_var, placeholder_text="50").grid(row=1, column=3, padx=4, pady=(0,6), sticky="w")
+        ctk.CTkLabel(automation_card, text="dns/vpn").grid(row=1, column=4, padx=(10,4), pady=(0,6), sticky="w")
+        ctk.CTkEntry(automation_card, width=55, textvariable=self.automation_points_dns_var, placeholder_text="30").grid(row=1, column=5, padx=4, pady=(0,6), sticky="w")
 
         lan_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         lan_card.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
@@ -1508,6 +1520,36 @@ class NetScouterApp(ctk.CTk):
         except ValueError:
             return 80
 
+    def _automation_points(self, kind: str) -> int:
+        mapping = {
+            "unassigned": self.automation_points_unassigned_var,
+            "frequency": self.automation_points_frequency_var,
+            "dns": self.automation_points_dns_var,
+        }
+        var = mapping.get(kind)
+        if var is None:
+            return 0
+        try:
+            return max(0, int(var.get().strip()))
+        except ValueError:
+            return {"unassigned": 20, "frequency": 50, "dns": 30}.get(kind, 0)
+
+    def _queue_dns_resolution(self, ip: str) -> None:
+        if ip in self.automation_dns_cache or ip in self.automation_dns_pending:
+            return
+        self.automation_dns_pending.add(ip)
+
+        def worker() -> None:
+            failed = False
+            try:
+                socket.gethostbyaddr(ip)
+            except OSError:
+                failed = True
+            self.automation_dns_cache[ip] = failed
+            self.automation_dns_pending.discard(ip)
+
+        threading.Thread(target=worker, daemon=True, name=f"dns-eval-{ip}").start()
+
     def _is_unassigned_port(self, port: int) -> bool:
         assigned = {20, 21, 22, 23, 25, 53, 80, 110, 123, 135, 137, 138, 139, 143, 443, 445, 3389}
         return int(port) not in assigned
@@ -1547,18 +1589,25 @@ class NetScouterApp(ctk.CTk):
         if not remote_ip:
             return
 
+        scope = self.automation_scope_var.get()
+        status = str(payload.get("status", "")).lower()
+        source = str(payload.get("source", "")).lower()
+        if scope == "Open Ports Only" and status != "open":
+            return
+        if scope == "Established Only" and source != "established":
+            return
+
         port = int(payload.get("port", 0) or 0)
         if port > 0 and self._is_unassigned_port(port):
-            self._update_behavioral_score(remote_ip, 20, f"unassigned-port:{port}")
+            self._update_behavioral_score(remote_ip, self._automation_points("unassigned"), f"unassigned-port:{port}")
 
-        try:
-            socket.gethostbyaddr(remote_ip)
-        except OSError:
-            self._update_behavioral_score(remote_ip, 30, "reverse-dns-failed")
+        self._queue_dns_resolution(remote_ip)
+        if self.automation_dns_cache.get(remote_ip, False):
+            self._update_behavioral_score(remote_ip, self._automation_points("dns"), "reverse-dns-failed")
 
         provider = str(payload.get("provider", "")).lower()
         if any(token in provider for token in ("vpn", "proxy", "tor")):
-            self._update_behavioral_score(remote_ip, 30, f"provider:{provider[:40]}")
+            self._update_behavioral_score(remote_ip, self._automation_points("dns"), f"provider:{provider[:40]}")
 
     def clear_filters(self) -> None:
         self.status_filter_var.set("All Ports")
@@ -2577,6 +2626,10 @@ class NetScouterApp(ctk.CTk):
         self.save_intel_var.set(bool(get_preference("settings.save_intel", self.save_intel_var.get())))
         self.save_ai_var.set(bool(get_preference("settings.save_ai", self.save_ai_var.get())))
         self.popup_notifications_var.set(bool(get_preference("settings.popup_notifications", self.popup_notifications_var.get())))
+        self.automation_scope_var.set(str(get_preference("settings.automation_scope", self.automation_scope_var.get())))
+        self.automation_points_unassigned_var.set(str(get_preference("settings.automation_points_unassigned", self.automation_points_unassigned_var.get())))
+        self.automation_points_frequency_var.set(str(get_preference("settings.automation_points_frequency", self.automation_points_frequency_var.get())))
+        self.automation_points_dns_var.set(str(get_preference("settings.automation_points_dns", self.automation_points_dns_var.get())))
 
     def _load_prompt_editor_text(self) -> None:
         if not hasattr(self, "prompt_editor_box"):
@@ -2602,6 +2655,10 @@ class NetScouterApp(ctk.CTk):
         set_preference("settings.save_intel", bool(self.save_intel_var.get()))
         set_preference("settings.save_ai", bool(self.save_ai_var.get()))
         set_preference("settings.popup_notifications", bool(self.popup_notifications_var.get()))
+        set_preference("settings.automation_scope", self.automation_scope_var.get())
+        set_preference("settings.automation_points_unassigned", self.automation_points_unassigned_var.get().strip())
+        set_preference("settings.automation_points_frequency", self.automation_points_frequency_var.get().strip())
+        set_preference("settings.automation_points_dns", self.automation_points_dns_var.get().strip())
         self._log("Settings saved.")
 
     def clear_db_logs(self) -> None:
