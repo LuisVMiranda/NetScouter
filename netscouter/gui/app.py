@@ -170,6 +170,7 @@ class NetScouterApp(ctk.CTk):
         self.port_range_var = ctk.StringVar(value="20-1024")
         self.local_info_var = ctk.StringVar(value="Local network context not loaded")
         self.schedule_hours_var = ctk.StringVar(value="6")
+        self.schedule_task_type_var = ctk.StringVar(value="Port Scanning")
         self.firewall_status_var = ctk.StringVar(value="Not queried")
         self.firewall_rule_name_var = ctk.StringVar(value="NetScouter Custom Rule")
         self.firewall_rule_port_var = ctk.StringVar(value="")
@@ -250,6 +251,13 @@ class NetScouterApp(ctk.CTk):
         self.save_ai_var = ctk.BooleanVar(value=False)
         self.settings_save_feedback_var = ctk.StringVar(value="")
         self.threat_action_hint_var = ctk.StringVar(value="Select a threat row to inspect evidence and follow-up guidance.")
+        self.threat_country_filter_var = ctk.StringVar(value="All Countries")
+        self.threat_reason_filter_var = ctk.StringVar(value="All Reasons")
+        self.auto_clear_port_var = ctk.StringVar(value="Disabled")
+        self.auto_clear_packet_var = ctk.StringVar(value="Disabled")
+        self.auto_clear_minutes_var = ctk.StringVar(value="15")
+        self._last_auto_clear_at = 0.0
+        self.scheduled_tasks: list[dict[str, str]] = []
         self.local_info_visible = False
 
         self._configure_grid()
@@ -536,15 +544,26 @@ class NetScouterApp(ctk.CTk):
 
         self.ops_row = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         self.ops_row.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
-        ctk.CTkLabel(self.ops_row, text="Every (hours)").grid(row=0, column=0, padx=6, pady=8)
-        ctk.CTkEntry(self.ops_row, width=70, textvariable=self.schedule_hours_var, placeholder_text="6").grid(row=0, column=1, padx=6, pady=8)
-        ctk.CTkButton(self.ops_row, text="Start Recurring", corner_radius=10, command=self.start_recurring_scan, width=130).grid(row=0, column=2, padx=6, pady=8)
-        ctk.CTkButton(self.ops_row, text="Stop Recurring", corner_radius=10, command=self.stop_recurring_scan, width=120).grid(row=0, column=3, padx=6, pady=8)
+        ctk.CTkLabel(self.ops_row, text="Task").grid(row=0, column=0, padx=6, pady=8)
+        ctk.CTkOptionMenu(self.ops_row, values=["Port Scanning", "Packet Filtering"], variable=self.schedule_task_type_var, width=150).grid(row=0, column=1, padx=6, pady=8)
+        ctk.CTkLabel(self.ops_row, text="Every (hours)").grid(row=0, column=2, padx=6, pady=8)
+        ctk.CTkEntry(self.ops_row, width=70, textvariable=self.schedule_hours_var, placeholder_text="6").grid(row=0, column=3, padx=6, pady=8)
+        ctk.CTkButton(self.ops_row, text="Start Recurring", corner_radius=10, command=self.start_recurring_scan, width=130).grid(row=0, column=4, padx=6, pady=8)
+        ctk.CTkButton(self.ops_row, text="Stop Recurring", corner_radius=10, command=self.stop_recurring_scan, width=120).grid(row=0, column=5, padx=6, pady=8)
+        ctk.CTkButton(self.ops_row, text="Delete Schedule", corner_radius=10, command=self.delete_selected_schedule_task, width=130, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=6, padx=6, pady=8)
+
+        self.scheduled_tasks_table = ttk.Treeview(self.ops_row, columns=("task", "frequency", "status", "summary"), show="headings", height=3)
+        for col, width in {"task": 130, "frequency": 110, "status": 90, "summary": 480}.items():
+            self.scheduled_tasks_table.heading(col, text=col.title())
+            self.scheduled_tasks_table.column(col, width=width, anchor="center")
+        self.scheduled_tasks_table.tag_configure("active", foreground="#10B981")
+        self.scheduled_tasks_table.grid(row=1, column=0, columnspan=7, sticky="ew", padx=8, pady=(0, 8))
+
         self.ops_refresh_firewall_button = ctk.CTkButton(self.ops_row, text="Refresh Firewall", corner_radius=10, command=self.refresh_firewall_insight, width=140)
-        self.ops_refresh_firewall_button.grid(row=0, column=4, padx=6, pady=8)
-        ctk.CTkButton(self.ops_row, text="STOP ALL", corner_radius=10, command=self.stop_all_tasks, width=110, fg_color="#DC2626", hover_color="#B91C1C").grid(row=0, column=5, padx=6, pady=8)
-        ctk.CTkLabel(self.ops_row, text="Firewall:").grid(row=0, column=6, padx=(10, 4), pady=8)
-        ctk.CTkLabel(self.ops_row, textvariable=self.firewall_status_var, width=300, anchor="w").grid(row=0, column=7, padx=4, pady=8, sticky="w")
+        self.ops_refresh_firewall_button.grid(row=2, column=0, padx=6, pady=8, sticky="w")
+        ctk.CTkButton(self.ops_row, text="STOP ALL", corner_radius=10, command=self.stop_all_tasks, width=110, fg_color="#DC2626", hover_color="#B91C1C").grid(row=2, column=1, padx=6, pady=8, sticky="w")
+        ctk.CTkLabel(self.ops_row, text="Firewall:").grid(row=2, column=2, padx=(10, 4), pady=8, sticky="w")
+        ctk.CTkLabel(self.ops_row, textvariable=self.firewall_status_var, width=300, anchor="w").grid(row=2, column=3, columnspan=3, padx=4, pady=8, sticky="w")
 
         automation_label = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         automation_label.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
@@ -564,6 +583,12 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkEntry(automation_card, width=55, textvariable=self.automation_points_frequency_var, placeholder_text="50").grid(row=1, column=3, padx=4, pady=(0,6), sticky="w")
         ctk.CTkLabel(automation_card, text="dns/vpn").grid(row=1, column=4, padx=(10,4), pady=(0,6), sticky="w")
         ctk.CTkEntry(automation_card, width=55, textvariable=self.automation_points_dns_var, placeholder_text="30").grid(row=1, column=5, padx=4, pady=(0,6), sticky="w")
+        ctk.CTkLabel(automation_card, text="Auto-clear Port Table").grid(row=2, column=0, padx=(10, 4), pady=(0, 6), sticky="w")
+        ctk.CTkOptionMenu(automation_card, values=["Disabled", "Enabled"], variable=self.auto_clear_port_var, width=110).grid(row=2, column=1, padx=4, pady=(0, 6), sticky="w")
+        ctk.CTkLabel(automation_card, text="Auto-clear Packet Table").grid(row=2, column=2, padx=(10, 4), pady=(0, 6), sticky="w")
+        ctk.CTkOptionMenu(automation_card, values=["Disabled", "Enabled"], variable=self.auto_clear_packet_var, width=110).grid(row=2, column=3, padx=4, pady=(0, 6), sticky="w")
+        ctk.CTkLabel(automation_card, text="Clear every (minutes)").grid(row=2, column=4, padx=(10, 4), pady=(0, 6), sticky="w")
+        ctk.CTkEntry(automation_card, width=70, textvariable=self.auto_clear_minutes_var, placeholder_text="15").grid(row=2, column=5, padx=4, pady=(0, 6), sticky="w")
 
         lan_label = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         lan_label.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 6))
@@ -667,6 +692,10 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkButton(header, text="Unban + Watch", width=116, command=self._threat_unban_watch_selected).grid(row=0, column=5, padx=4, pady=6)
         ctk.CTkButton(header, text="Unban IP", width=92, command=self._threat_unban_selected).grid(row=0, column=6, padx=4, pady=6)
         ctk.CTkButton(header, text="Remove Entry", width=104, command=self._threat_remove_selected).grid(row=0, column=7, padx=4, pady=6)
+        self.threat_country_filter = ctk.CTkOptionMenu(header, values=["All Countries"], variable=self.threat_country_filter_var, width=150, command=lambda _v: self._refresh_threats_table())
+        self.threat_country_filter.grid(row=0, column=8, padx=4, pady=6)
+        self.threat_reason_filter = ctk.CTkOptionMenu(header, values=["All Reasons"], variable=self.threat_reason_filter_var, width=170, command=lambda _v: self._refresh_threats_table())
+        self.threat_reason_filter.grid(row=0, column=9, padx=4, pady=6)
 
         cols = ("timestamp", "ip", "action", "status", "reason", "expires")
         self.threats_table = ttk.Treeview(pane, columns=cols, show="headings", height=10, selectmode="extended")
@@ -766,6 +795,7 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkButton(controls, text="Stop", corner_radius=10, width=90, command=self.stop_live_packet_stream, fg_color=STOP_RED, hover_color=STOP_RED_HOVER).grid(row=0, column=2, padx=6, pady=6)
         ctk.CTkButton(controls, text="Export packet slice", corner_radius=10, width=140, command=self.export_packet_slice).grid(row=0, column=3, padx=6, pady=6)
         ctk.CTkButton(controls, text="Save Log (DB)", corner_radius=10, width=120, command=lambda: self.save_logs_to_db("packet_filtering")).grid(row=0, column=6, padx=6, pady=6)
+        ctk.CTkButton(controls, text="Clear Table", corner_radius=10, width=110, command=self.clear_packet_filter_table, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=7, padx=6, pady=6)
         ctk.CTkOptionMenu(controls, values=["All", "High", "Average", "Low"], variable=self.packet_risk_filter_var, width=100, command=lambda _x: self._refresh_packet_filtering_table()).grid(row=0, column=4, padx=6, pady=6)
         ctk.CTkOptionMenu(controls, values=["All", "Weird", "Normal"], variable=self.packet_behavior_filter_var, width=100, command=lambda _x: self._refresh_packet_filtering_table()).grid(row=0, column=5, padx=6, pady=6)
         ctk.CTkLabel(controls, textvariable=self.packet_stream_status_var).grid(row=1, column=0, columnspan=3, padx=8, pady=(0, 6), sticky="w")
@@ -960,7 +990,7 @@ class NetScouterApp(ctk.CTk):
         self.start_scan(source="scheduler")
 
     def _behavioral_scheduler_tick(self) -> None:
-        """Scheduler now checks stateful scoreboard before active scan actions."""
+        """Scheduler checks scoreboard and runs configured recurring task."""
         log_schedule_event(action="behavioral_tick", job_id=self.scheduled_job_id, source="scheduler")
         stale_cutoff = time.time() - 1800
         for ip, board in list(self.automation_scoreboard.items()):
@@ -968,6 +998,14 @@ class NetScouterApp(ctk.CTk):
                 self.automation_scoreboard.pop(ip, None)
                 continue
             self._maybe_trigger_behavioral_action(ip)
+
+        task = self.schedule_task_type_var.get().strip()
+        if task == "Packet Filtering":
+            self.after(0, self.start_live_packet_stream)
+            self.after(0, lambda: self._notify_popup("Scheduled task started: Packet Filtering", tab="Operations"))
+        else:
+            self.after(0, self._start_scan_from_schedule)
+            self.after(0, lambda: self._notify_popup("Scheduled task started: Port Scanning", tab="Operations"))
 
     def start_established_scan(self) -> None:
         threading.Thread(target=self._start_established_scan_worker, daemon=True, name="established-scan-launcher").start()
@@ -1670,13 +1708,20 @@ class NetScouterApp(ctk.CTk):
         self.automation_triggered_ips.add(remote_ip)
         action = self.automation_action_var.get().strip().lower()
         reasons = "; ".join(str(x) for x in board.get("reasons", []))
+        rules = (
+            f"rules: threshold={self._automation_threshold()}, "
+            f"unassigned={self._automation_points('unassigned')}, "
+            f"frequency={self._automation_points('frequency')}, "
+            f"dns_vpn={self._automation_points('dns')}"
+        )
+        reason_context = f"automation score={points}; {rules}; matched={reasons}"
         self._log(f"🤖 Behavioral automation triggered for {remote_ip}: points={points}, action={action}, reasons={reasons}")
-        record_scan_history("behavioral_automation", {"ip": remote_ip, "points": points, "action": action, "reasons": reasons})
+        record_scan_history("behavioral_automation", {"ip": remote_ip, "points": points, "action": action, "reasons": reasons, "rules": rules})
         self._notify_popup(f"Behavioral action: {action} on {remote_ip} ({points} pts)", tab="Operations")
         if action == "banish":
-            threading.Thread(target=self._banish_ip_worker, args=(remote_ip,), daemon=True, name="auto-banish").start()
+            threading.Thread(target=self._banish_ip_worker, args=(remote_ip, reason_context), daemon=True, name="auto-banish").start()
         else:
-            threading.Thread(target=self._quarantine_ip_worker, args=(remote_ip,), daemon=True, name="auto-quarantine").start()
+            threading.Thread(target=self._quarantine_ip_worker, args=(remote_ip, reason_context), daemon=True, name="auto-quarantine").start()
 
     def _evaluate_conditional_automation(self, payload: dict[str, str | int | list[str]]) -> None:
         if not self.automation_enabled_var.get():
@@ -2090,7 +2135,7 @@ class NetScouterApp(ctk.CTk):
                     "ip": ip,
                     "action": "unban",
                     "status": "success" if bool(result.get("success")) else "failed",
-                    "reason": str(result.get("message", "")),
+                    "reason": f"{result.get('message', '')} | {reason_context}".strip(" |"),
                 }
             )
             self._packet_log(f"Unblock request for {ip}: {result.get('message')}")
@@ -2171,6 +2216,7 @@ class NetScouterApp(ctk.CTk):
 
         if processed > 0:
             self._rerender_table()
+        self._maybe_auto_clear_tables()
 
         self.after(20 if processed >= QUEUE_BATCH_LIMIT else 120, self._drain_ui_queue)
 
@@ -2195,19 +2241,28 @@ class NetScouterApp(ctk.CTk):
             max_instances=1,
             coalesce=True,
         )
+        task = self.schedule_task_type_var.get().strip()
+        summary = f"{task} every {interval_hours:g} hour(s)"
         log_schedule_event(
             action="scheduled",
             job_id=self.scheduled_job_id,
             source="scheduler",
-            metadata={"interval_hours": interval_hours},
+            metadata={"interval_hours": interval_hours, "task": task},
         )
-        self._log(f"Recurring scan scheduled every {interval_hours:g} hour(s)")
+        self.scheduled_tasks = [{"task": task, "frequency": f"Every {interval_hours:g}h", "status": "active", "summary": summary}]
+        self._refresh_scheduled_tasks_table()
+        self._log(f"Recurring task scheduled: {summary}")
+        self._notify_popup(f"Schedule active: {summary}", tab="Operations")
 
     def stop_recurring_scan(self) -> None:
         if self.scheduler.get_job(self.scheduled_job_id):
             self.scheduler.remove_job(self.scheduled_job_id)
             log_schedule_event(action="stopped", job_id=self.scheduled_job_id, source="scheduler")
-            self._log("Recurring scan stopped")
+            for task in self.scheduled_tasks:
+                if task.get("status") == "active":
+                    task["status"] = "stopped"
+            self._refresh_scheduled_tasks_table()
+            self._log("Recurring schedule stopped")
         else:
             self._log("No recurring scan job to stop")
 
@@ -2398,7 +2453,7 @@ class NetScouterApp(ctk.CTk):
         for ip in ips:
             threading.Thread(target=self._quarantine_ip_worker, args=(ip,), daemon=True, name="quarantine-ip").start()
 
-    def _banish_ip_worker(self, ip: str) -> None:
+    def _banish_ip_worker(self, ip: str, reason_context: str = "") -> None:
         try:
             result = enforce_ip_policy(ip, action="block")
         except Exception as exc:  # noqa: BLE001
@@ -2416,14 +2471,14 @@ class NetScouterApp(ctk.CTk):
                 "ip": ip,
                 "action": "block",
                 "status": "success" if bool(result.get("success")) else "failed",
-                "reason": str(result.get("message", "")),
+                "reason": f"{result.get('message', '')} | {reason_context}".strip(" |"),
             }
         )
         self.after(0, self._refresh_threats_table)
         message = result.get("message", str(result))
         self.after(0, lambda: self._log(f"Banish {ip}: {message}"))
 
-    def _quarantine_ip_worker(self, ip: str) -> None:
+    def _quarantine_ip_worker(self, ip: str, reason_context: str = "") -> None:
         try:
             result = enforce_ip_policy(
                 ip,
@@ -2449,7 +2504,7 @@ class NetScouterApp(ctk.CTk):
                 "ip": ip,
                 "action": "quarantine",
                 "status": "success" if bool(result.get("success")) else "failed",
-                "reason": str(result.get("message", "")),
+                "reason": f"{result.get('message', '')} | {reason_context}".strip(" |"),
             }
         )
         append_quarantine_interaction({**event, "result": result})
@@ -2787,6 +2842,10 @@ class NetScouterApp(ctk.CTk):
         self.automation_points_unassigned_var.set(str(get_preference("settings.automation_points_unassigned", self.automation_points_unassigned_var.get())))
         self.automation_points_frequency_var.set(str(get_preference("settings.automation_points_frequency", self.automation_points_frequency_var.get())))
         self.automation_points_dns_var.set(str(get_preference("settings.automation_points_dns", self.automation_points_dns_var.get())))
+        self.auto_clear_port_var.set(str(get_preference("settings.auto_clear_port", self.auto_clear_port_var.get())))
+        self.auto_clear_packet_var.set(str(get_preference("settings.auto_clear_packet", self.auto_clear_packet_var.get())))
+        self.auto_clear_minutes_var.set(str(get_preference("settings.auto_clear_minutes", self.auto_clear_minutes_var.get())))
+        self.schedule_task_type_var.set(str(get_preference("settings.schedule_task_type", self.schedule_task_type_var.get())))
 
     def _load_prompt_editor_text(self) -> None:
         if not hasattr(self, "prompt_editor_box"):
@@ -2825,6 +2884,10 @@ class NetScouterApp(ctk.CTk):
         set_preference("settings.automation_points_unassigned", self.automation_points_unassigned_var.get().strip())
         set_preference("settings.automation_points_frequency", self.automation_points_frequency_var.get().strip())
         set_preference("settings.automation_points_dns", self.automation_points_dns_var.get().strip())
+        set_preference("settings.auto_clear_port", self.auto_clear_port_var.get())
+        set_preference("settings.auto_clear_packet", self.auto_clear_packet_var.get())
+        set_preference("settings.auto_clear_minutes", self.auto_clear_minutes_var.get().strip())
+        set_preference("settings.schedule_task_type", self.schedule_task_type_var.get())
         self.settings_save_feedback_var.set("All settings saved.")
         self.after(2500, lambda: self.settings_save_feedback_var.set(""))
         self._log("Settings saved.")
@@ -2937,6 +3000,8 @@ class NetScouterApp(ctk.CTk):
         except Exception:
             wan_ipv4 = "Unknown"
 
+        country, city = self._threat_geo(ip)
+
         return {
             "captured_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "internal_ips": sorted(internal_ips),
@@ -2950,7 +3015,83 @@ class NetScouterApp(ctk.CTk):
             "local_ipv4": self.local_ipv4,
             "local_ipv6": self.local_ipv6,
             "public_ipv4": wan_ipv4,
+            "country": country,
+            "city": city,
         }
+
+    def _threat_geo(self, ip: str) -> tuple[str, str]:
+        if not ip:
+            return "Unknown", "Unknown"
+        try:
+            intel = get_ip_intel(ip)
+        except Exception:
+            return "Unknown", "Unknown"
+        return str(intel.get("country") or "Unknown"), str(intel.get("city") or "Unknown")
+
+    def clear_packet_filter_table(self) -> None:
+        self.packet_service.clear_packets()
+        self.packet_filtered_packets = []
+        if hasattr(self, "packet_filter_table"):
+            self.packet_filter_table.delete(*self.packet_filter_table.get_children())
+        if hasattr(self, "packet_detail_box"):
+            self.packet_detail_box.delete("1.0", "end")
+        self.packet_selected_summary_var.set("Packet table cleared. Live capture still running.")
+        self._packet_log("Packet filtering table cleared without stopping capture")
+
+    def _auto_clear_interval_seconds(self) -> int:
+        try:
+            minutes = max(1, int(float(self.auto_clear_minutes_var.get().strip())))
+        except ValueError:
+            minutes = 15
+        return minutes * 60
+
+    def _maybe_auto_clear_tables(self) -> None:
+        now = time.time()
+        if self._last_auto_clear_at and now - self._last_auto_clear_at < self._auto_clear_interval_seconds():
+            return
+        port_enabled = self.auto_clear_port_var.get() == "Enabled"
+        packet_enabled = self.auto_clear_packet_var.get() == "Enabled"
+        if not port_enabled and not packet_enabled:
+            return
+        self._last_auto_clear_at = now
+        if port_enabled:
+            self.scan_results.clear()
+            self.filtered_rows.clear()
+            self._table_item_lookup.clear()
+            if hasattr(self, "results_table"):
+                self.results_table.delete(*self.results_table.get_children())
+            self._log("Auto-clear: Port scanning table cleared")
+        if packet_enabled:
+            self.clear_packet_filter_table()
+            self._packet_log("Auto-clear: Packet filtering table cleared")
+
+    def _refresh_scheduled_tasks_table(self) -> None:
+        table = getattr(self, "scheduled_tasks_table", None)
+        if table is None:
+            return
+        table.delete(*table.get_children())
+        for idx, task in enumerate(self.scheduled_tasks):
+            tag = ("active",) if task.get("status") == "active" else ()
+            table.insert("", "end", iid=f"schedule-{idx}", values=(task.get("task", ""), task.get("frequency", ""), task.get("status", ""), task.get("summary", "")), tags=tag)
+
+    def delete_selected_schedule_task(self) -> None:
+        table = getattr(self, "scheduled_tasks_table", None)
+        if table is None:
+            return
+        selected = table.selection()
+        if not selected:
+            self._log("Select a scheduled task row to delete")
+            return
+        for iid in selected:
+            try:
+                index = int(iid.split("-")[-1])
+            except ValueError:
+                continue
+            if 0 <= index < len(self.scheduled_tasks):
+                self.scheduled_tasks[index]["status"] = "deleted"
+        self.stop_recurring_scan()
+        self._refresh_scheduled_tasks_table()
+        self._notify_popup("Scheduled task deleted", tab="Operations")
 
     def _refresh_threats_table(self) -> None:
         if not hasattr(self, "threats_table"):
@@ -2958,7 +3099,31 @@ class NetScouterApp(ctk.CTk):
         self.threats_table.delete(*self.threats_table.get_children())
         self.threat_event_lookup = {}
         events = self.threat_events[-600:]
+        countries = {"All Countries"}
+        reasons = {"All Reasons"}
+        for event in events:
+            reason = str(event.get("reason") or "").strip()
+            if reason:
+                reasons.add(reason[:80])
+            snapshot = event.get("detail_snapshot") if isinstance(event.get("detail_snapshot"), dict) else {}
+            country = str(snapshot.get("country") or "Unknown")
+            countries.add(country)
+
+        if hasattr(self, "threat_country_filter"):
+            self.threat_country_filter.configure(values=sorted(countries))
+        if hasattr(self, "threat_reason_filter"):
+            self.threat_reason_filter.configure(values=sorted(reasons))
+
         for idx, event in enumerate(events):
+            snapshot = event.get("detail_snapshot") if isinstance(event.get("detail_snapshot"), dict) else {}
+            country = str(snapshot.get("country") or "Unknown")
+            reason = str(event.get("reason") or "").strip()
+            selected_country = self.threat_country_filter_var.get()
+            selected_reason = self.threat_reason_filter_var.get()
+            if selected_country != "All Countries" and country != selected_country:
+                continue
+            if selected_reason != "All Reasons" and reason[:80] != selected_reason:
+                continue
             iid = f"threat-{idx}"
             self.threat_event_lookup[iid] = event
             self.threats_table.insert(
@@ -3116,6 +3281,8 @@ class NetScouterApp(ctk.CTk):
         top_status = top_status_live or str(snapshot.get("top_status") or "n/a")
         top_flags = top_flags_live or str(snapshot.get("top_flags") or "n/a")
         wan_ipv4 = str(snapshot.get("public_ipv4") or "Unknown")
+        country = str(snapshot.get("country") or "Unknown")
+        city = str(snapshot.get("city") or "Unknown")
 
         return [
             f"IP: {ip}",
@@ -3131,6 +3298,7 @@ class NetScouterApp(ctk.CTk):
             f"- Internal network IP(s) accessed: {internal_text}",
             f"- Local IPv4: {snapshot.get('local_ipv4', self.local_ipv4)} | Local IPv6: {snapshot.get('local_ipv6', self.local_ipv6)}",
             f"- Public IPv4 at event time: {wan_ipv4}",
+            f"- Remote geo: {city}, {country}",
             f"- Attempt count in packet buffer: {attempts}",
             f"- Scan rows linked: {scan_linked}",
             f"- Dominant statuses: {top_status}",
@@ -3241,7 +3409,7 @@ class NetScouterApp(ctk.CTk):
                     "ip": ip,
                     "action": "unban",
                     "status": "success" if bool(result.get("success")) else "failed",
-                    "reason": str(result.get("message", "")),
+                    "reason": f"{result.get('message', '')} | {reason_context}".strip(" |"),
                 }
             )
         self._refresh_threats_table()

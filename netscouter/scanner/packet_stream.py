@@ -212,6 +212,10 @@ class PacketCaptureService:
             items = items[-limit:]
         return items
 
+    def clear_packets(self) -> None:
+        with self._lock:
+            self._packets.clear()
+
     def export_packets(self, path: str, *, remote_ip: str | None = None, limit: int | None = None) -> int:
         import json
 
