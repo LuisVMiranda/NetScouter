@@ -627,7 +627,7 @@ class NetScouterApp(ctk.CTk):
 
         intel_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         intel_card.grid(row=5, column=0, sticky="ew", padx=8, pady=(0, 10))
-        ctk.CTkEntry(intel_card, textvariable=self.shodan_key_var, width=220, placeholder_text="Shodan API key").grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkEntry(intel_card, textvariable=self.abuseipdb_key_var, width=220, placeholder_text="AbuseIPDB API key").grid(row=0, column=1, padx=6, pady=6)
         ctk.CTkEntry(intel_card, textvariable=self.virustotal_key_var, width=220, placeholder_text="VirusTotal API key").grid(row=0, column=2, padx=6, pady=6)
         ctk.CTkEntry(intel_card, textvariable=self.otx_key_var, width=220, placeholder_text="AlienVault OTX key").grid(row=0, column=3, padx=6, pady=6)
         ctk.CTkButton(intel_card, text="Apply Intel Keys", width=130, command=self.apply_settings).grid(row=0, column=4, padx=6, pady=6)
