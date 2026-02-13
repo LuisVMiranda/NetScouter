@@ -110,6 +110,8 @@ def detect_local_model(
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         listed = (proc.stdout or "") + "\n" + (proc.stderr or "")
         if proc.returncode == 0 and model_name in listed:
@@ -153,6 +155,8 @@ def install_local_model(model_name: str = "llama3.2:3b") -> bool:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     return proc.returncode == 0
 
@@ -324,6 +328,8 @@ def analyze_logs_with_ollama(
     filter_model: dict[str, Any] | None = None,
     progress_callback: Callable[[float, str], None] | None = None,
     cancel_event: Event | None = None,
+    analyst_prompt_override: str | None = None,
+    network_prompt_override: str | None = None,
 ) -> tuple[bool, str]:
     """Run a local Ollama model against NetScouter logs and return analysis text."""
     executable = shutil.which("ollama")
@@ -331,8 +337,8 @@ def analyze_logs_with_ollama(
         return False, "Ollama CLI was not found in PATH."
 
     runtime_context = context or resolve_local_network_context()
-    system_prompt_a = build_analyst_prompt()
-    system_prompt_b = build_network_engine_prompt(runtime_context)
+    system_prompt_a = analyst_prompt_override or build_analyst_prompt()
+    system_prompt_b = network_prompt_override or build_network_engine_prompt(runtime_context)
 
     deduped = deduplicate_scan_rows(scan_results)
     compressed_lines = compress_rows_by_patterns(deduped)
@@ -373,6 +379,8 @@ def analyze_logs_with_ollama(
                 check=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired:
