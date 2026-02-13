@@ -61,7 +61,7 @@ from netscouter.scanner.honeypot import LocalHoneypot
 from netscouter.scanner.packet_stream import PacketCaptureService, derive_lan_cidr
 from netscouter.scanner.lan_mapper import DeviceRegistry, correlate_iot_outbound_anomalies, discover_lan_devices
 from netscouter.scheduler.jobs import get_schedule_events, log_schedule_event
-from netscouter.storage import get_preference, list_threat_events, record_scan_history, record_threat_event, set_preference
+from netscouter.storage import get_preference, list_threat_events, record_scan_history, record_threat_event, replace_threat_events, set_preference
 from netscouter.storage.preferences import DB_PATH
 
 DARK_THEME = {
@@ -666,6 +666,7 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkButton(header, text="Temp Ban", width=96, command=self._threat_temp_ban_selected).grid(row=0, column=4, padx=4, pady=6)
         ctk.CTkButton(header, text="Unban + Watch", width=116, command=self._threat_unban_watch_selected).grid(row=0, column=5, padx=4, pady=6)
         ctk.CTkButton(header, text="Unban IP", width=92, command=self._threat_unban_selected).grid(row=0, column=6, padx=4, pady=6)
+        ctk.CTkButton(header, text="Remove Entry", width=104, command=self._threat_remove_selected).grid(row=0, column=7, padx=4, pady=6)
 
         cols = ("timestamp", "ip", "action", "status", "reason", "expires")
         self.threats_table = ttk.Treeview(pane, columns=cols, show="headings", height=10, selectmode="browse")
@@ -3207,6 +3208,24 @@ class NetScouterApp(ctk.CTk):
         )
         self._refresh_threats_table()
         self._log(f"Threat list unban {ip}: {result.get('message')}")
+
+    def _persist_threat_events(self) -> None:
+        try:
+            replace_threat_events([event for event in self.threat_events if isinstance(event, dict)])
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Threat DB rewrite failed: {exc}")
+
+    def _threat_remove_selected(self) -> None:
+        event = self._selected_threat_event()
+        if not event:
+            return
+        if event in self.threat_events:
+            self.threat_events.remove(event)
+        self._persist_threat_events()
+        self._refresh_threats_table()
+        self.threat_timeline_box.delete("1.0", "end")
+        self.threat_detail_box.delete("1.0", "end")
+        self.threat_action_hint_var.set("Threat entry removed from table and database history.")
 
     def _rows_for_ai_analysis(self) -> list[dict[str, str | int | list[str]]]:
         rows = list(self._scan_rows_for_reporting())

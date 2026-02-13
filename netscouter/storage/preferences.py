@@ -120,3 +120,15 @@ def list_threat_events(limit: int = 500) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             events.append({"timestamp": created_at, "ip": "", "action": "unknown", "status": "failed", "reason": str(payload)})
     return events
+
+
+def replace_threat_events(events: list[dict[str, Any]]) -> None:
+    """Replace persisted threat event history with the provided list."""
+    stamp = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute("DELETE FROM threat_events")
+        for event in events:
+            conn.execute(
+                "INSERT INTO threat_events(event_json, created_at) VALUES (?, ?)",
+                (json.dumps(event, ensure_ascii=False), stamp),
+            )

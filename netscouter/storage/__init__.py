@@ -6,6 +6,7 @@ from .preferences import (
     list_threat_events,
     record_scan_history,
     record_threat_event,
+    replace_threat_events,
     set_preference,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "record_scan_history",
     "list_scan_history",
     "record_threat_event",
+    "replace_threat_events",
     "list_threat_events",
 ]
