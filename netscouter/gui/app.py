@@ -93,6 +93,7 @@ CLEAR_AMBER_HOVER = "#92400E"
 QUEUE_BATCH_LIMIT = 120
 MAX_LOG_LINES = 2000
 PACKET_SLICE_LIMIT = 120
+THREAT_DETAIL_PACKET_LIMIT = 1000
 TABLE_PAGE_SIZE = 200
 TABLE_RENDER_CHUNK_SIZE = 40
 SUSPICIOUS_PROCESS_NAMES = {
@@ -163,6 +164,7 @@ class NetScouterApp(ctk.CTk):
         self.local_ipv4 = "n/a"
         self.local_ipv6 = "n/a"
         self.packet_watchlist: set[str] = set()
+        self.last_known_process_by_ip: dict[str, dict[str, str]] = {}
 
         self.target_var = ctk.StringVar(value="127.0.0.1")
         self.port_range_var = ctk.StringVar(value="20-1024")
@@ -2851,11 +2853,89 @@ class NetScouterApp(ctk.CTk):
 
     def _append_threat_event(self, event: dict[str, str | bool]) -> None:
         event.setdefault("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        ip = str(event.get("ip") or "").strip()
+        if ip:
+            event["detail_snapshot"] = self._capture_threat_snapshot(ip)
         self.threat_events.append(event)
         try:
             record_threat_event(event)
         except Exception as exc:  # noqa: BLE001
             self._log(f"Threat DB save failed: {exc}")
+
+    def _capture_threat_snapshot(self, ip: str) -> dict[str, object]:
+        packets = [
+            p
+            for p in self.packet_service.get_packets(limit=THREAT_DETAIL_PACKET_LIMIT)
+            if str(p.get("dst") or "") == ip or str(p.get("src") or "") == ip
+        ]
+        rows = [r for r in self.scan_results if str(r.get("remote_ip") or "") == ip]
+        internal_ips: set[str] = set()
+        accessed_ports: set[str] = set()
+        pids = Counter()
+        procs = Counter()
+        flags = Counter(str(p.get("tcp_flags") or "") for p in packets)
+        statuses = Counter(str(r.get("status") or "unknown") for r in rows)
+
+        for pkt in packets:
+            src = str(pkt.get("src") or "")
+            dst = str(pkt.get("dst") or "")
+            local_candidate = dst if src == ip else src
+            try:
+                obj = ipaddress.ip_address(local_candidate)
+                if obj.is_private or obj.is_loopback or obj.is_link_local:
+                    internal_ips.add(local_candidate)
+            except ValueError:
+                pass
+            raw = pkt.get("raw", {}) if isinstance(pkt.get("raw"), dict) else {}
+            if src == ip and raw.get("dst_port"):
+                accessed_ports.add(str(raw.get("dst_port")))
+            if dst == ip and raw.get("src_port"):
+                accessed_ports.add(str(raw.get("src_port")))
+            pid = pkt.get("pid")
+            if pid:
+                pids[str(pid)] += 1
+            pname = str(pkt.get("process_name") or "").strip()
+            if pname:
+                procs[pname] += 1
+
+        for row in rows:
+            local_hint = str(row.get("local_ip") or "").strip()
+            if local_hint:
+                internal_ips.add(local_hint)
+            pid = row.get("pid")
+            if pid:
+                pids[str(pid)] += 1
+            pname = str(row.get("process_name") or "").strip()
+            if pname:
+                procs[pname] += 1
+
+        top_proc_name = procs.most_common(1)[0][0] if procs else ""
+        top_pid = pids.most_common(1)[0][0] if pids else ""
+        if top_proc_name or top_pid:
+            self.last_known_process_by_ip[ip] = {"process_name": top_proc_name, "pid": top_pid}
+        fallback = self.last_known_process_by_ip.get(ip, {})
+
+        wan_ipv4 = "Unknown"
+        try:
+            context = resolve_local_network_context()
+            wan_ipv4 = str(context.get("public_ip") or "Unknown")
+        except Exception:
+            wan_ipv4 = "Unknown"
+
+        return {
+            "captured_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "internal_ips": sorted(internal_ips),
+            "attempt_count": len(packets),
+            "scan_rows": len(rows),
+            "top_status": ", ".join(f"{k}:{v}" for k, v in statuses.most_common(3)),
+            "top_flags": ", ".join(f"{k or 'none'}:{v}" for k, v in flags.most_common(3)),
+            "top_processes": ", ".join(f"{k}:{v}" for k, v in procs.most_common(3)) or fallback.get("process_name", ""),
+            "top_pids": ", ".join(f"{k}:{v}" for k, v in pids.most_common(3)) or fallback.get("pid", ""),
+            "accessed_ports": sorted(accessed_ports),
+            "local_ipv4": self.local_ipv4,
+            "local_ipv6": self.local_ipv6,
+            "public_ipv4": wan_ipv4,
+        }
 
     def _refresh_threats_table(self) -> None:
         if not hasattr(self, "threats_table"):
@@ -2927,12 +3007,18 @@ class NetScouterApp(ctk.CTk):
 
     def _build_threat_detail_lines(self, event: dict[str, str | bool]) -> list[str]:
         ip = str(event.get("ip") or "").strip()
-        packet_hits = [p for p in self.packet_service.get_packets(limit=PACKET_SLICE_LIMIT) if str(p.get("dst") or "") == ip or str(p.get("src") or "") == ip]
+        snapshot = event.get("detail_snapshot") if isinstance(event.get("detail_snapshot"), dict) else {}
+
+        packet_hits = [
+            p
+            for p in self.packet_service.get_packets(limit=THREAT_DETAIL_PACKET_LIMIT)
+            if str(p.get("dst") or "") == ip or str(p.get("src") or "") == ip
+        ]
         scan_rows = [r for r in self.scan_results if str(r.get("remote_ip") or "") == ip]
         statuses = Counter(str(r.get("status") or "unknown") for r in scan_rows)
-        top_status = ", ".join(f"{k}:{v}" for k, v in statuses.most_common(3)) or "n/a"
+        top_status_live = ", ".join(f"{k}:{v}" for k, v in statuses.most_common(3))
         flags = Counter(str(p.get("tcp_flags") or "") for p in packet_hits)
-        top_flags = ", ".join(f"{k or 'none'}:{v}" for k, v in flags.most_common(3)) or "n/a"
+        top_flags_live = ", ".join(f"{k or 'none'}:{v}" for k, v in flags.most_common(3))
         reason_text = str(event.get("reason") or "")
         explain = []
         lower = reason_text.lower()
@@ -2945,10 +3031,11 @@ class NetScouterApp(ctk.CTk):
         if not explain:
             explain.append("Triggered by automation/manual operator action; inspect timeline for sequence")
 
-        internal_ips: set[str] = set()
+        internal_ips: set[str] = set(str(i) for i in snapshot.get("internal_ips", []) if str(i).strip())
         pids = Counter()
         process_names = Counter()
-        accessed_ports: set[str] = set()
+        accessed_ports: set[str] = set(str(i) for i in snapshot.get("accessed_ports", []) if str(i).strip())
+
         for pkt in packet_hits:
             src = str(pkt.get("src") or "")
             dst = str(pkt.get("dst") or "")
@@ -2982,24 +3069,36 @@ class NetScouterApp(ctk.CTk):
             if local_hint:
                 internal_ips.add(local_hint)
 
-        top_pid = ", ".join(f"{k}:{v}" for k, v in pids.most_common(3)) or "n/a"
-        top_proc = ", ".join(f"{k}:{v}" for k, v in process_names.most_common(3)) or "n/a"
-        internal_text = ", ".join(sorted(internal_ips)) or self.local_ipv4
+        fallback = self.last_known_process_by_ip.get(ip, {})
+        top_pid = ", ".join(f"{k}:{v}" for k, v in pids.most_common(3)) or str(snapshot.get("top_pids") or fallback.get("pid") or "n/a")
+        top_proc = ", ".join(f"{k}:{v}" for k, v in process_names.most_common(3)) or str(snapshot.get("top_processes") or fallback.get("process_name") or "n/a")
+        if top_proc != "n/a" or top_pid != "n/a":
+            self.last_known_process_by_ip[ip] = {"process_name": top_proc.split(":",1)[0], "pid": top_pid.split(":",1)[0]}
+
+        internal_text = ", ".join(sorted(internal_ips)) or str(snapshot.get("local_ipv4") or self.local_ipv4 or "n/a")
         ports_text = ", ".join(sorted(accessed_ports)) or "n/a"
+        attempts = len(packet_hits) if packet_hits else int(snapshot.get("attempt_count") or 0)
+        scan_linked = len(scan_rows) if scan_rows else int(snapshot.get("scan_rows") or 0)
+        top_status = top_status_live or str(snapshot.get("top_status") or "n/a")
+        top_flags = top_flags_live or str(snapshot.get("top_flags") or "n/a")
+        wan_ipv4 = str(snapshot.get("public_ipv4") or "Unknown")
 
         return [
             f"IP: {ip}",
             f"Last Action: {event.get('action', '')} | Status: {event.get('status', '')}",
             f"Reason: {reason_text}",
             f"Expires At: {event.get('expires_at', 'n/a')}",
+            f"Snapshot Captured At: {snapshot.get('captured_at', 'n/a')}",
             "",
             "Explainability:",
             *[f"- {item}" for item in explain],
             "",
             "Observed Activity Snapshot:",
             f"- Internal network IP(s) accessed: {internal_text}",
-            f"- Attempt count in packet buffer: {len(packet_hits)}",
-            f"- Scan rows linked: {len(scan_rows)}",
+            f"- Local IPv4: {snapshot.get('local_ipv4', self.local_ipv4)} | Local IPv6: {snapshot.get('local_ipv6', self.local_ipv6)}",
+            f"- Public IPv4 at event time: {wan_ipv4}",
+            f"- Attempt count in packet buffer: {attempts}",
+            f"- Scan rows linked: {scan_linked}",
             f"- Dominant statuses: {top_status}",
             f"- Frequent TCP flags: {top_flags}",
             f"- Local process names: {top_proc}",
