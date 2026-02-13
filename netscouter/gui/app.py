@@ -542,6 +542,55 @@ class NetScouterApp(ctk.CTk):
     def _build_possible_threats_tab(self, pane: ctk.CTkFrame) -> None:
         build_possible_threats_tab(self, pane)
 
+    def _build_settings_tab(self, pane: ctk.CTkFrame) -> None:
+        pane.grid_columnconfigure(0, weight=1)
+        pane.grid_rowconfigure(8, weight=1)
+
+        dashboard_label = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        dashboard_label.grid(row=0, column=0, sticky="ew", padx=8, pady=(10, 5))
+        ctk.CTkLabel(dashboard_label, text="Dashboard Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+
+        dashboard_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        dashboard_card.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 10))
+        ctk.CTkEntry(dashboard_card, textvariable=self.target_var, width=180, placeholder_text="Persistent target IP/hostname").grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkEntry(dashboard_card, textvariable=self.port_range_var, width=120, placeholder_text="Persistent port range").grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkOptionMenu(dashboard_card, values=["Layman", "Expert"], variable=self.log_detail_mode_var, width=110).grid(row=0, column=3, padx=6, pady=6)
+        ctk.CTkCheckBox(dashboard_card, text="Popup notifications", variable=self.popup_notifications_var).grid(row=0, column=4, padx=6, pady=6)
+
+        packet_label = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        packet_label.grid(row=2, column=0, sticky="ew", padx=8, pady=(5, 5))
+        ctk.CTkLabel(packet_label, text="Packet Filtering Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+
+        packet_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        packet_card.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 10))
+        ctk.CTkCheckBox(packet_card, text="Save Port Scan logs", variable=self.save_ports_var).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkCheckBox(packet_card, text="Save Packet logs", variable=self.save_packets_var).grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkCheckBox(packet_card, text="Save Intel events", variable=self.save_intel_var).grid(row=0, column=3, padx=6, pady=6)
+        ctk.CTkCheckBox(packet_card, text="Save AI output", variable=self.save_ai_var).grid(row=0, column=4, padx=6, pady=6)
+
+        intel_label = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        intel_label.grid(row=4, column=0, sticky="ew", padx=8, pady=(5, 5))
+        ctk.CTkLabel(intel_label, text="Intelligence/API Settings", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+
+        intel_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        intel_card.grid(row=5, column=0, sticky="ew", padx=8, pady=(0, 10))
+        ctk.CTkEntry(intel_card, textvariable=self.abuseipdb_key_var, width=220, placeholder_text="AbuseIPDB API key").grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkEntry(intel_card, textvariable=self.virustotal_key_var, width=220, placeholder_text="VirusTotal API key").grid(row=0, column=2, padx=6, pady=6)
+        ctk.CTkEntry(intel_card, textvariable=self.otx_key_var, width=220, placeholder_text="AlienVault OTX key").grid(row=0, column=3, padx=6, pady=6)
+        ctk.CTkButton(intel_card, text="Apply Intel Keys", width=130, command=self.apply_settings).grid(row=0, column=4, padx=6, pady=6)
+
+        ai_label = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        ai_label.grid(row=6, column=0, sticky="ew", padx=8, pady=(5, 5))
+        ctk.CTkLabel(ai_label, text="AI Auditor/Database", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
+
+        ai_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
+        ai_card.grid(row=7, column=0, sticky="ew", padx=8, pady=(0, 10))
+        ctk.CTkButton(ai_card, text="Clear DB Logs", width=130, command=self.clear_db_logs, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=0, padx=6, pady=6)
+        ctk.CTkButton(ai_card, text="Clear Prompt Prefs", width=150, command=self.clear_prompt_prefs, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkButton(ai_card, text="Save All Settings", width=150, command=self.save_settings_preferences, fg_color="#0F766E", hover_color="#115E59").grid(row=0, column=2, padx=(16, 6), pady=6)
+        ctk.CTkLabel(ai_card, textvariable=self.settings_save_feedback_var, anchor="w").grid(row=0, column=3, padx=(4, 6), pady=6, sticky="w")
+        ctk.CTkLabel(ai_card, text="Use Save All Settings to persist every option above.", anchor="w").grid(row=1, column=0, columnspan=4, padx=10, pady=(0, 6), sticky="w")
+
     def _build_results_table(self, parent: ctk.CTkFrame, row: int) -> None:
         self.table_card = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
         self.table_card.grid(row=row, column=0, sticky="nsew", padx=8, pady=(0, 8))
