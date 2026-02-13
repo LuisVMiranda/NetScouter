@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import multiprocessing as mp
+import time
 import ipaddress
 import importlib.util
 import os
@@ -105,6 +107,25 @@ SUSPICIOUS_PROCESS_NAMES = {
 }
 
 
+def packet_alert_worker(input_queue: mp.Queue, output_queue: mp.Queue, stop_event: mp.Event) -> None:
+    """Process packet events off the GUI thread and emit behavioral alerts."""
+    hits_by_ip: dict[str, list[float]] = {}
+    while not stop_event.is_set():
+        try:
+            event = input_queue.get(timeout=0.4)
+        except Exception:
+            continue
+        ip = str(event.get("ip") or "").strip()
+        if not ip:
+            continue
+        now = float(event.get("when") or time.time())
+        bucket = hits_by_ip.setdefault(ip, [])
+        bucket.append(now)
+        hits_by_ip[ip] = [stamp for stamp in bucket if now - stamp <= 1.0]
+        if len(hits_by_ip[ip]) > 10:
+            output_queue.put({"ip": ip, "reason": "Connection frequency > 10 hits/sec", "points": 50})
+
+
 class NetScouterApp(ctk.CTk):
     """Top-level dashboard window."""
 
@@ -192,9 +213,11 @@ class NetScouterApp(ctk.CTk):
         self.discovered_devices: list[dict[str, str]] = []
         self.lan_anomalies: list[dict[str, str | int]] = []
         self.automation_enabled_var = ctk.BooleanVar(value=False)
-        self.automation_threshold_var = ctk.StringVar(value="2")
-        self.automation_action_var = ctk.StringVar(value="quarantine")
+        self.automation_threshold_var = ctk.StringVar(value="80")
+        self.automation_action_var = ctk.StringVar(value="banish")
         self.automation_triggered_ips: set[str] = set()
+        self.automation_scoreboard: dict[str, dict[str, object]] = {}
+        self.popup_notifications_var = ctk.BooleanVar(value=True)
         self.packet_stream_mode_var = ctk.StringVar(value="Selected Row")
         self.packet_scope_hint_var = ctk.StringVar(value="Scope: select a row or set target host")
         self.packet_stream_status_var = ctk.StringVar(value="Live stream idle")
@@ -224,8 +247,10 @@ class NetScouterApp(ctk.CTk):
 
         self._start_honeypot()
         self._ensure_nmap_available()
+        self._init_packet_alert_process()
 
         self.after(120, self._drain_ui_queue)
+        self.after(300, self._poll_packet_alert_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _set_scan_running(self, running: bool) -> None:
@@ -264,6 +289,58 @@ class NetScouterApp(ctk.CTk):
                 self._log("nmap installed successfully.")
                 return
         self._log("Could not auto-install nmap. Please use installer/wizard for your OS.")
+
+    def _init_packet_alert_process(self) -> None:
+        self.packet_alert_input: mp.Queue = mp.Queue()
+        self.packet_alert_output: mp.Queue = mp.Queue()
+        self.packet_alert_stop = mp.Event()
+        self.packet_alert_proc = mp.Process(
+            target=packet_alert_worker,
+            args=(self.packet_alert_input, self.packet_alert_output, self.packet_alert_stop),
+            daemon=True,
+            name="packet-alert-worker",
+        )
+        self.packet_alert_proc.start()
+
+    def _poll_packet_alert_queue(self) -> None:
+        for _ in range(20):
+            try:
+                event = self.packet_alert_output.get_nowait()
+            except Exception:
+                break
+            ip = str(event.get("ip") or "")
+            points = int(event.get("points") or 0)
+            reason = str(event.get("reason") or "")
+            if ip:
+                self._update_behavioral_score(ip, points, reason)
+        self.after(300, self._poll_packet_alert_queue)
+
+    def _notify_popup(self, message: str, *, tab: str = "Dashboard") -> None:
+        if not self.popup_notifications_var.get():
+            return
+        popup = ctk.CTkToplevel(self)
+        popup.overrideredirect(True)
+        width, height = 360, 110
+        x = max(0, self.winfo_screenwidth() - width - 30)
+        y = max(0, self.winfo_screenheight() - height - 70)
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+        bg = "#111827" if self.current_mode == "dark" else "#DBEAFE"
+        fg = "#E2E8F0" if self.current_mode == "dark" else "#1E3A8A"
+        popup.configure(fg_color=bg)
+        close_btn = ctk.CTkButton(popup, text="X", width=26, fg_color=STOP_RED, hover_color=STOP_RED_HOVER, command=popup.destroy)
+        close_btn.pack(anchor="ne", padx=6, pady=4)
+        body = ctk.CTkLabel(popup, text=message, text_color=fg, justify="left", anchor="w", wraplength=330)
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+
+        def open_tab(_event: object) -> None:
+            popup.destroy()
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+            self._show_workspace_tab(tab)
+
+        body.bind("<Button-1>", open_tab)
+        popup.after(5000, popup.destroy)
 
     def _configure_grid(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -409,7 +486,7 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkLabel(self.settings_row, text="AI timeout (s)").grid(row=1, column=4, padx=(8, 4), pady=8)
         ctk.CTkEntry(self.settings_row, width=80, textvariable=self.ai_timeout_var, placeholder_text="120").grid(row=1, column=5, padx=4, pady=8)
         ctk.CTkCheckBox(self.settings_row, text="Auto-block by consensus", variable=self.auto_block_consensus_var).grid(row=0, column=6, rowspan=2, padx=10, pady=8)
-        ctk.CTkButton(self.settings_row, text="Apply Settings", command=self.apply_settings, width=130).grid(row=0, column=7, rowspan=2, padx=(4, 10), pady=8)
+        ctk.CTkButton(self.settings_row, text="Apply Intel Keys", command=self.apply_settings, width=130).grid(row=0, column=7, rowspan=2, padx=(4, 10), pady=8)
 
         firewall_frame = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         firewall_frame.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
@@ -438,10 +515,11 @@ class NetScouterApp(ctk.CTk):
         automation_card.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
         ctk.CTkLabel(automation_card, text="Conditional Automations", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
         ctk.CTkCheckBox(automation_card, text="Enable auto-response", variable=self.automation_enabled_var).grid(row=0, column=1, padx=6, pady=6)
-        ctk.CTkLabel(automation_card, text="High-risk threshold").grid(row=0, column=2, padx=(12, 4), pady=6)
-        ctk.CTkEntry(automation_card, width=70, textvariable=self.automation_threshold_var, placeholder_text="2").grid(row=0, column=3, padx=4, pady=6)
+        ctk.CTkLabel(automation_card, text="Point threshold").grid(row=0, column=2, padx=(12, 4), pady=6)
+        ctk.CTkEntry(automation_card, width=70, textvariable=self.automation_threshold_var, placeholder_text="80").grid(row=0, column=3, padx=4, pady=6)
         ctk.CTkLabel(automation_card, text="Action").grid(row=0, column=4, padx=(12, 4), pady=6)
         ctk.CTkOptionMenu(automation_card, values=["quarantine", "banish"], variable=self.automation_action_var, width=120).grid(row=0, column=5, padx=4, pady=6)
+        ctk.CTkLabel(automation_card, text="Scoring: Unassigned port +20 | >10 hits/sec +50 | DNS fail/VPN +30", anchor="w").grid(row=1, column=0, columnspan=6, padx=10, pady=(0,6), sticky="w")
 
         lan_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         lan_card.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
@@ -487,6 +565,7 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkEntry(dashboard_card, textvariable=self.target_var, width=180, placeholder_text="Persistent target IP/hostname").grid(row=0, column=1, padx=6, pady=6)
         ctk.CTkEntry(dashboard_card, textvariable=self.port_range_var, width=120, placeholder_text="Persistent port range").grid(row=0, column=2, padx=6, pady=6)
         ctk.CTkOptionMenu(dashboard_card, values=["Layman", "Expert"], variable=self.log_detail_mode_var, width=110).grid(row=0, column=3, padx=6, pady=6)
+        ctk.CTkCheckBox(dashboard_card, text="Popup notifications", variable=self.popup_notifications_var).grid(row=0, column=4, padx=6, pady=6)
 
         packet_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         packet_card.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
@@ -502,14 +581,15 @@ class NetScouterApp(ctk.CTk):
         ctk.CTkEntry(intel_card, textvariable=self.abuseipdb_key_var, width=220, placeholder_text="AbuseIPDB API key").grid(row=0, column=1, padx=6, pady=6)
         ctk.CTkEntry(intel_card, textvariable=self.virustotal_key_var, width=220, placeholder_text="VirusTotal API key").grid(row=0, column=2, padx=6, pady=6)
         ctk.CTkEntry(intel_card, textvariable=self.otx_key_var, width=220, placeholder_text="AlienVault OTX key").grid(row=0, column=3, padx=6, pady=6)
-        ctk.CTkButton(intel_card, text="Apply Settings", width=130, command=self.apply_settings).grid(row=0, column=4, padx=6, pady=6)
+        ctk.CTkButton(intel_card, text="Apply Intel Keys", width=130, command=self.apply_settings).grid(row=0, column=4, padx=6, pady=6)
 
         ai_card = self._register_card(ctk.CTkFrame(pane, corner_radius=10))
         ai_card.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
         ctk.CTkLabel(ai_card, text="AI Auditor/Database", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=10, pady=6, sticky="w")
-        ctk.CTkButton(ai_card, text="Save Preferences", width=130, command=self.save_settings_preferences).grid(row=0, column=1, padx=6, pady=6)
+        ctk.CTkButton(ai_card, text="Save All Settings", width=150, command=self.save_settings_preferences, fg_color="#0F766E", hover_color="#115E59").grid(row=0, column=4, padx=6, pady=6, sticky="e")
         ctk.CTkButton(ai_card, text="Clear DB Logs", width=130, command=self.clear_db_logs, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=2, padx=6, pady=6)
         ctk.CTkButton(ai_card, text="Clear Prompt Prefs", width=150, command=self.clear_prompt_prefs, fg_color=CLEAR_AMBER, hover_color=CLEAR_AMBER_HOVER).grid(row=0, column=3, padx=6, pady=6)
+        ctk.CTkLabel(ai_card, text="Use Save All Settings to persist every option above.", anchor="w").grid(row=1, column=0, columnspan=5, padx=10, pady=(0,6), sticky="w")
 
     def _build_results_table(self, parent: ctk.CTkFrame, row: int) -> None:
         self.table_card = self._register_card(ctk.CTkFrame(parent, corner_radius=10))
@@ -773,6 +853,16 @@ class NetScouterApp(ctk.CTk):
     def _start_scan_from_schedule(self) -> None:
         log_schedule_event(action="triggered", job_id=self.scheduled_job_id, source="scheduler")
         self.start_scan(source="scheduler")
+
+    def _behavioral_scheduler_tick(self) -> None:
+        """Scheduler now checks stateful scoreboard before active scan actions."""
+        log_schedule_event(action="behavioral_tick", job_id=self.scheduled_job_id, source="scheduler")
+        stale_cutoff = time.time() - 1800
+        for ip, board in list(self.automation_scoreboard.items()):
+            if float(board.get("last_seen", 0.0)) < stale_cutoff:
+                self.automation_scoreboard.pop(ip, None)
+                continue
+            self._maybe_trigger_behavioral_action(ip)
 
     def start_established_scan(self) -> None:
         threading.Thread(target=self._start_established_scan_worker, daemon=True, name="established-scan-launcher").start()
@@ -1414,29 +1504,61 @@ class NetScouterApp(ctk.CTk):
 
     def _automation_threshold(self) -> int:
         try:
-            return max(1, int(self.automation_threshold_var.get().strip()))
+            return max(20, int(self.automation_threshold_var.get().strip()))
         except ValueError:
-            return 2
+            return 80
+
+    def _is_unassigned_port(self, port: int) -> bool:
+        assigned = {20, 21, 22, 23, 25, 53, 80, 110, 123, 135, 137, 138, 139, 143, 443, 445, 3389}
+        return int(port) not in assigned
+
+    def _update_behavioral_score(self, remote_ip: str, points: int, reason: str) -> None:
+        now = time.time()
+        board = self.automation_scoreboard.setdefault(remote_ip, {"points": 0, "last_seen": now, "reasons": []})
+        board["points"] = int(board.get("points", 0)) + int(points)
+        board["last_seen"] = now
+        reasons = list(board.get("reasons", []))
+        reasons.append(reason)
+        board["reasons"] = reasons[-8:]
+        self._maybe_trigger_behavioral_action(remote_ip)
+
+    def _maybe_trigger_behavioral_action(self, remote_ip: str) -> None:
+        if not self.automation_enabled_var.get() or remote_ip in self.automation_triggered_ips:
+            return
+        board = self.automation_scoreboard.get(remote_ip, {})
+        points = int(board.get("points", 0))
+        if points < self._automation_threshold():
+            return
+        self.automation_triggered_ips.add(remote_ip)
+        action = self.automation_action_var.get().strip().lower()
+        reasons = "; ".join(str(x) for x in board.get("reasons", []))
+        self._log(f"🤖 Behavioral automation triggered for {remote_ip}: points={points}, action={action}, reasons={reasons}")
+        record_scan_history("behavioral_automation", {"ip": remote_ip, "points": points, "action": action, "reasons": reasons})
+        self._notify_popup(f"Behavioral action: {action} on {remote_ip} ({points} pts)", tab="Ops/Schedule")
+        if action == "banish":
+            threading.Thread(target=self._banish_ip_worker, args=(remote_ip,), daemon=True, name="auto-banish").start()
+        else:
+            threading.Thread(target=self._quarantine_ip_worker, args=(remote_ip,), daemon=True, name="auto-quarantine").start()
 
     def _evaluate_conditional_automation(self, payload: dict[str, str | int | list[str]]) -> None:
         if not self.automation_enabled_var.get():
             return
         remote_ip = str(payload.get("remote_ip", "")).strip()
-        if not remote_ip or remote_ip in self.automation_triggered_ips:
-            return
-        if str(payload.get("risk", "")).lower() != "high":
-            return
-        high_count = sum(1 for row in self.scan_results if str(row.get("remote_ip", "")).strip() == remote_ip and str(row.get("risk", "")).lower() == "high")
-        if high_count < self._automation_threshold():
+        if not remote_ip:
             return
 
-        self.automation_triggered_ips.add(remote_ip)
-        action = self.automation_action_var.get().strip().lower()
-        self._log(f"🤖 Automation triggered for {remote_ip}: action={action}, high-risk hits={high_count}")
-        if action == "banish":
-            threading.Thread(target=self._banish_ip_worker, args=(remote_ip,), daemon=True, name="auto-banish").start()
-        else:
-            threading.Thread(target=self._quarantine_ip_worker, args=(remote_ip,), daemon=True, name="auto-quarantine").start()
+        port = int(payload.get("port", 0) or 0)
+        if port > 0 and self._is_unassigned_port(port):
+            self._update_behavioral_score(remote_ip, 20, f"unassigned-port:{port}")
+
+        try:
+            socket.gethostbyaddr(remote_ip)
+        except OSError:
+            self._update_behavioral_score(remote_ip, 30, "reverse-dns-failed")
+
+        provider = str(payload.get("provider", "")).lower()
+        if any(token in provider for token in ("vpn", "proxy", "tor")):
+            self._update_behavioral_score(remote_ip, 30, f"provider:{provider[:40]}")
 
     def clear_filters(self) -> None:
         self.status_filter_var.set("All Ports")
@@ -1702,6 +1824,7 @@ class NetScouterApp(ctk.CTk):
                 f"len={packet.get('packet_length')} flags={packet.get('tcp_flags')} "
                 f"pid={pid} proc={proc} malformed={packet.get('malformed')} error={packet.get('parse_error')}"
             )
+            self._dispatch_packet_event(packet)
         self.packet_stream_console.delete("1.0", "end")
         self.packet_stream_console.insert("1.0", "\n".join(lines))
 
@@ -1716,6 +1839,15 @@ class NetScouterApp(ctk.CTk):
                 self._packet_log(f"[Packet Alert] {alert}")
 
         self._refresh_packet_filtering_table()
+
+    def _dispatch_packet_event(self, packet: dict[str, object]) -> None:
+        ip = str(packet.get("src") or packet.get("dst") or "")
+        if not ip:
+            return
+        try:
+            self.packet_alert_input.put_nowait({"ip": ip, "when": time.time()})
+        except Exception:
+            return
 
     def _classify_packet_row(self, packet: dict[str, object]) -> tuple[str, str]:
         malformed = bool(packet.get("malformed"))
@@ -1878,7 +2010,7 @@ class NetScouterApp(ctk.CTk):
             self.scheduler.start()
 
         self.scheduler.add_job(
-            self._start_scan_from_schedule,
+            self._behavioral_scheduler_tick,
             "interval",
             hours=interval_hours,
             id=self.scheduled_job_id,
@@ -2100,6 +2232,7 @@ class NetScouterApp(ctk.CTk):
 
         if result.get("success"):
             self.after(0, lambda: self._apply_containment_state(ip, "Blocked"))
+            self.after(0, lambda: self._notify_popup(f"Blocked {ip} by firewall policy", tab="Intelligence"))
         message = result.get("message", str(result))
         self.after(0, lambda: self._log(f"Banish {ip}: {message}"))
 
@@ -2127,6 +2260,7 @@ class NetScouterApp(ctk.CTk):
 
         if result.get("success"):
             self.after(0, lambda: self._apply_containment_state(ip, "Quarantined"))
+            self.after(0, lambda: self._notify_popup(f"Quarantined {ip} to sinkhole", tab="Intelligence"))
         message = result.get("message", str(result))
         self.after(0, lambda: self._log(f"Quarantine {ip}: {message}"))
 
@@ -2175,6 +2309,12 @@ class NetScouterApp(ctk.CTk):
             return message
         simplified = message.replace("ESTABLISHED", "connected").replace("consensus", "risk match")
         simplified = simplified.replace("iface", "interface")
+        if "unassigned-port" in simplified:
+            simplified += " | Why: uncommon port behavior can indicate probing."
+        if "reverse-dns-failed" in simplified:
+            simplified += " | Why: unresolved host identity may be suspicious."
+        if "Behavioral automation triggered" in simplified:
+            simplified += " | Why: multiple suspicious signals crossed the safety threshold."
         return simplified
 
     def clear_intelligence_logs(self) -> None:
@@ -2436,6 +2576,7 @@ class NetScouterApp(ctk.CTk):
         self.save_packets_var.set(bool(get_preference("settings.save_packets", self.save_packets_var.get())))
         self.save_intel_var.set(bool(get_preference("settings.save_intel", self.save_intel_var.get())))
         self.save_ai_var.set(bool(get_preference("settings.save_ai", self.save_ai_var.get())))
+        self.popup_notifications_var.set(bool(get_preference("settings.popup_notifications", self.popup_notifications_var.get())))
 
     def _load_prompt_editor_text(self) -> None:
         if not hasattr(self, "prompt_editor_box"):
@@ -2460,6 +2601,7 @@ class NetScouterApp(ctk.CTk):
         set_preference("settings.save_packets", bool(self.save_packets_var.get()))
         set_preference("settings.save_intel", bool(self.save_intel_var.get()))
         set_preference("settings.save_ai", bool(self.save_ai_var.get()))
+        set_preference("settings.popup_notifications", bool(self.popup_notifications_var.get()))
         self._log("Settings saved.")
 
     def clear_db_logs(self) -> None:
@@ -2637,19 +2779,61 @@ class NetScouterApp(ctk.CTk):
             return
         threading.Thread(target=self._show_charts_worker, daemon=True, name="charts-worker").start()
 
-    def _on_close(self) -> None:
+    def _ensure_tray_icon(self) -> None:
+        if getattr(self, "_tray_started", False):
+            return
+        if importlib.util.find_spec("pystray") is None or importlib.util.find_spec("PIL") is None:
+            return
+        import pystray
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (64, 64), color="#1E3A8A")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((16, 16, 48, 48), fill="#0EA5E9")
+
+        def on_restore(_icon: object, _item: object) -> None:
+            self.after(0, self._restore_from_tray)
+
+        def on_quit(_icon: object, _item: object) -> None:
+            self.after(0, self._shutdown_application)
+
+        menu = pystray.Menu(
+            pystray.MenuItem("Restore", on_restore),
+            pystray.MenuItem("Quit", on_quit),
+        )
+        self._tray_icon = pystray.Icon("NetScouter", image, "NetScouter", menu)
+        threading.Thread(target=self._tray_icon.run, daemon=True, name="tray-icon").start()
+        self._tray_started = True
+
+    def _restore_from_tray(self) -> None:
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def _minimize_to_background(self) -> None:
+        self.withdraw()
+        self._ensure_tray_icon()
+        self._notify_popup("NetScouter is still running in the background tray.", tab="Dashboard")
+
+    def _shutdown_application(self) -> None:
         if self.scan_job:
             self.scan_job.cancel()
-
         self.packet_service.stop(timeout=0.8)
         self._hide_table_tooltip()
         self.honeypot.stop(timeout=0.8)
-
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
-
+        if hasattr(self, "packet_alert_stop"):
+            self.packet_alert_stop.set()
+        if hasattr(self, "packet_alert_proc") and self.packet_alert_proc.is_alive():
+            self.packet_alert_proc.join(timeout=0.8)
+        if getattr(self, "_tray_started", False) and hasattr(self, "_tray_icon"):
+            self._tray_icon.stop()
         self.intel_executor.shutdown(wait=False, cancel_futures=True)
         self.destroy()
+
+    def _on_close(self) -> None:
+        self._minimize_to_background()
 
 
 def launch_dashboard() -> None:
